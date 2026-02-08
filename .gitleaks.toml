@@ -1,0 +1,24 @@
+# Gitleaks configuration
+# See https://github.com/gitleaks/gitleaks for full documentation
+
+title = "gitleaks config"
+
+[extend]
+# Use default gitleaks rules
+useDefault = true
+
+[allowlist]
+description = "Allow list for known false positives"
+paths = [
+  '''\.secrets\.baseline''',
+  '''\.gitleaksignore''',
+  '''\.gitleaks\.toml''',
+  '''LICENSE''',
+  '''README\.md''',
+  '''CONTRIBUTING\.md''',
+  '''SETUP\.md''',
+]
+
+[allowlist.regexes]
+# Add regex patterns for known false positives
+# Example: commitSHAs = '''[0-9a-f]{40}'''

@@ -1,0 +1,15 @@
+# Gitleaks ignore patterns
+# Patterns to exclude from secret detection
+
+# Example patterns (uncomment and modify as needed):
+# *.example
+# test/
+# .env.example
+# *.template
+
+# Common false positives for shell scripts
+# These are example patterns - adjust based on your needs
+# LICENSE
+# README.md
+# CONTRIBUTING.md
+# SETUP.md

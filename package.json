@@ -1,0 +1,28 @@
+{
+  "name": "proxmox-create-cloud-template",
+  "version": "0.1.0",
+  "description": "A bash script to automate the creation of cloud-init enabled VM templates on Proxmox VE",
+  "scripts": {
+    "lint": "shellcheck create-cloud-template.sh",
+    "test": "bash -n create-cloud-template.sh",
+    "format": "shfmt -i 2 -bn -ci -sr -w create-cloud-template.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_USERNAME/proxmox_create-cloud-template.git"
+  },
+  "keywords": [
+    "proxmox",
+    "cloud-init",
+    "vm",
+    "template",
+    "automation",
+    "bash"
+  ],
+  "author": "Matthew Mellor",
+  "license": "MIT",
+  "devDependencies": {},
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
