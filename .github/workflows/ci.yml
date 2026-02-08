@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+jobs:
+  lint:
+    name: Lint and Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+
+      - name: Install ShellCheck
+        uses: ludeeus/action-shellcheck@master
+
+      - name: Run CI checks with Makefile
+        run: |
+          chmod +x create-cloud-template.sh
+          make ci
+        continue-on-error: false
+
+      - name: Verify script is executable
+        run: |
+          test -x create-cloud-template.sh || chmod +x create-cloud-template.sh
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup detect-secrets
+        run: |
+          pip install detect-secrets
+
+      - name: Create secrets baseline if missing
+        run: |
+          if [ ! -f .secrets.baseline ]; then
+            detect-secrets scan --baseline .secrets.baseline
+          fi
+
+      - name: Audit secrets baseline
+        run: |
+          detect-secrets audit .secrets.baseline --report --json || true
+
+      - name: Run pre-commit security hooks
+        uses: pre-commit/action@v3.0.0
+        continue-on-error: false
+
+  test:
+    name: Test Script Help
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Make script executable
+        run: chmod +x create-cloud-template.sh
+
+      - name: Test help output
+        run: |
+          ./create-cloud-template.sh --help | head -20
+
+      - name: Test script syntax validation
+        run: |
+          # Test that script validates its own arguments
+          ./create-cloud-template.sh --invalid-option 2>&1 | grep -q "Unknown option" || exit 1

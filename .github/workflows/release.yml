@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  security-check:
+    name: Security Check Before Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup detect-secrets
+        run: |
+          pip install detect-secrets
+
+      - name: Create secrets baseline if missing
+        run: |
+          if [ ! -f .secrets.baseline ]; then
+            detect-secrets scan --baseline .secrets.baseline
+          fi
+
+      - name: Audit secrets baseline
+        run: |
+          detect-secrets audit .secrets.baseline --report --json || exit 1
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: security-check
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from git tags
+        id: get_version
+        run: |
+          # Get the latest tag, or use v0.0.0 if no tags exist
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+          # Extract version number (remove 'v' prefix)
+          VERSION="${LATEST_TAG#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Determine next version based on commit messages since last tag
+          COMMITS_SINCE_TAG=$(git log ${LATEST_TAG}..HEAD --oneline 2>/dev/null || git log --oneline)
+
+          if echo "$COMMITS_SINCE_TAG" | grep -qE "^(feat|feature)(\(.+\))?:"; then
+            # Major or minor bump for features
+            NEXT_VERSION=$(echo "$VERSION" | awk -F. '{printf "%d.%d.%d", $1, $2+1, 0}')
+            BUMP_TYPE="minor"
+          elif echo "$COMMITS_SINCE_TAG" | grep -qE "^(fix|bugfix)(\(.+\))?:"; then
+            # Patch bump for fixes
+            NEXT_VERSION=$(echo "$VERSION" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')
+            BUMP_TYPE="patch"
+          else
+            # Default to patch for other changes
+            NEXT_VERSION=$(echo "$VERSION" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')
+            BUMP_TYPE="patch"
+          fi
+
+          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "Current version: $VERSION"
+          echo "Next version: $NEXT_VERSION ($BUMP_TYPE)"
+
+      - name: Check if release needed
+        id: check_release
+        run: |
+          # Only create release if there are new commits since last tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LATEST_TAG" ]; then
+            echo "needs_release=true" >> $GITHUB_OUTPUT
+            echo "No existing tags found, will create initial release"
+          else
+            COMMITS_SINCE_TAG=$(git rev-list ${LATEST_TAG}..HEAD --count)
+            if [ "$COMMITS_SINCE_TAG" -gt 0 ]; then
+              echo "needs_release=true" >> $GITHUB_OUTPUT
+              echo "Found $COMMITS_SINCE_TAG new commits since $LATEST_TAG"
+            else
+              echo "needs_release=false" >> $GITHUB_OUTPUT
+              echo "No new commits since $LATEST_TAG, skipping release"
+            fi
+          fi
+
+      - name: Generate changelog
+        if: steps.check_release.outputs.needs_release == 'true'
+        id: changelog
+        run: |
+          LATEST_TAG="${{ steps.get_version.outputs.latest_tag }}"
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+            # First release - get all commits
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --reverse)
+          else
+            # Get commits since last tag
+            CHANGELOG=$(git log ${LATEST_TAG}..HEAD --pretty=format:"- %s (%h)")
+          fi
+
+          # Escape for GitHub Actions
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        if: steps.check_release.outputs.needs_release == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.get_version.outputs.next_version }}
+          name: Release v${{ steps.get_version.outputs.next_version }}
+          body: |
+            ## Changes in v${{ steps.get_version.outputs.next_version }}
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ### Download
+            Download the script directly:
+            ```bash
+            wget https://raw.githubusercontent.com/${{ github.repository }}/v${{ steps.get_version.outputs.next_version }}/create-cloud-template.sh
+            chmod +x create-cloud-template.sh
+            sudo ./create-cloud-template.sh
+            ```
+
+            Or download the full release package from the [Releases page](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.get_version.outputs.next_version }}).
+
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.get_version.outputs.latest_tag }}...v${{ steps.get_version.outputs.next_version }}
+          files: |
+            create-cloud-template.sh
+            README.md
+            LICENSE
+          draft: false
+          prerelease: false
+          generate_release_notes: true
