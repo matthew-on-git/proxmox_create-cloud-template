@@ -523,6 +523,9 @@ create_vm_template() {
     qm set "$TEMPLATE_VMID" --ciuser "$CI_USER"
     log "Cloud-init user set to '${CI_USER}'"
 
+    # Keep cloud-init networking defaulted to DHCP
+    qm set "$TEMPLATE_VMID" --ipconfig0 ip=dhcp,ip6=dhcp
+
     # Update password
     if [[ -n "$CI_PASSWORD" ]]; then
       qm set "$TEMPLATE_VMID" --cipassword "$(openssl passwd -6 "$CI_PASSWORD")"
@@ -553,11 +556,17 @@ create_vm_template() {
     apt-get install -y -qq libguestfs-tools
   fi
 
-  # Pre-install qemu-guest-agent into the image
-  log "Customizing cloud image (installing qemu-guest-agent)..."
+  # Pre-install qemu-guest-agent + sanitize guest identity/state
+  log "Customizing cloud image (installing qemu-guest-agent + template cleanup)..."
   virt-customize -a "$IMAGE_PATH" \
     --install qemu-guest-agent \
-    --run-command "systemctl enable qemu-guest-agent"
+    --run-command "systemctl enable qemu-guest-agent" \
+    --run-command "cloud-init clean --logs --seed || true" \
+    --run-command "truncate -s 0 /etc/machine-id" \
+    --run-command "rm -f /var/lib/dbus/machine-id" \
+    --run-command "rm -f /etc/netplan/50-cloud-init.yaml" \
+    --run-command "rm -f /var/lib/dhcp/*.leases" \
+    --run-command "rm -rf /var/lib/cloud/*"
 
   # Create VM
   qm create "$TEMPLATE_VMID" \
@@ -594,6 +603,9 @@ create_vm_template() {
 
   # Default cloud-init user
   qm set "$TEMPLATE_VMID" --ciuser "$CI_USER"
+
+  # Default networking: DHCP via cloud-init
+  qm set "$TEMPLATE_VMID" --ipconfig0 ip=dhcp,ip6=dhcp
 
   # Cloud-init password
   if [[ -n "$CI_PASSWORD" ]]; then
@@ -644,7 +656,7 @@ ${GREEN}════════════════════════
 
 ${YELLOW}Clone example:${NC}
   qm clone ${TEMPLATE_VMID} <NEW_VMID> --name <VM_NAME> --full
-  qm set <NEW_VMID> --ipconfig0 ip=<IP>/24,gw=<GW> --cores 4 --memory 4096
+  qm set <NEW_VMID> --ipconfig0 ip=dhcp,ip6=dhcp --cores 4 --memory 4096
   qm start <NEW_VMID>
 
 EOF
