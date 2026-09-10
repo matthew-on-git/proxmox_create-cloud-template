@@ -40,6 +40,15 @@ error() {
   exit 1
 }
 
+# ── Convert filesystem path to Proxmox storage volume ID ──────────────
+# /var/lib/vz/template/iso/file.iso → local:iso/file.iso
+path_to_volume() {
+  local path="$1"
+  local basename
+  basename=$(basename "$path")
+  echo "local:iso/${basename}"
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -845,10 +854,10 @@ create_omarchy_template() {
   qm set "$TEMPLATE_VMID" --scsi0 "${STORAGE_POOL}:40,discard=on,iothread=1"
 
   # Omarchy ISO
-  qm set "$TEMPLATE_VMID" --ide2 "${OMARCHY_ISO_PATH},media=cdrom"
+  qm set "$TEMPLATE_VMID" --ide2 "$(path_to_volume "${OMARCHY_ISO_PATH}"),media=cdrom"
 
   # cidata ISO
-  qm set "$TEMPLATE_VMID" --ide3 "${OMARCHY_CIDATA_PATH},media=cdrom"
+  qm set "$TEMPLATE_VMID" --ide3 "$(path_to_volume "${OMARCHY_CIDATA_PATH}"),media=cdrom"
 
   # Boot order: CD-ROM first (for ISO install)
   qm set "$TEMPLATE_VMID" --boot order='ide2;scsi0'
