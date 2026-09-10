@@ -28,3 +28,11 @@ test-*.sh
 .bmad-infrastructure-devops/
 .claude/
 .cursor/
+
+# --- DevRail ---
+.bmad/
+.agents/
+.pre-commit-logs/
+# Keep agents.yaml but ignore other opencode files
+.opencode/
+!.opencode/agents.yaml
