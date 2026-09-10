@@ -41,7 +41,7 @@ error() {
 }
 
 usage() {
-  cat << EOF
+  cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
 Create a cloud-init VM template on a Proxmox host.
@@ -85,58 +85,58 @@ TEMPLATE_ALREADY_EXISTS=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --os)
-      OS_TYPE="$2"
-      shift 2
-      ;;
-    --vmid)
-      TEMPLATE_VMID="$2"
-      VMID_FROM_FLAG=true
-      shift 2
-      ;;
-    --name)
-      TEMPLATE_NAME="$2"
-      shift 2
-      ;;
-    --bridge)
-      NETWORK_BRIDGE="$2"
-      shift 2
-      ;;
-    --storage)
-      STORAGE_POOL="$2"
-      shift 2
-      ;;
-    --image)
-      CUSTOM_IMAGE="$2"
-      shift 2
-      ;;
-    --user)
-      CI_USER="$2"
-      shift 2
-      ;;
-    --password)
-      CI_PASSWORD="$2"
-      shift 2
-      ;;
-    --sshkey)
-      SSH_PUBKEY_FILE="$2"
-      shift 2
-      ;;
-    --yes)
-      SKIP_CONFIRM=true
-      shift
-      ;;
-    -h | --help) usage ;;
-    *) error "Unknown option: $1" ;;
+  --os)
+    OS_TYPE="$2"
+    shift 2
+    ;;
+  --vmid)
+    TEMPLATE_VMID="$2"
+    VMID_FROM_FLAG=true
+    shift 2
+    ;;
+  --name)
+    TEMPLATE_NAME="$2"
+    shift 2
+    ;;
+  --bridge)
+    NETWORK_BRIDGE="$2"
+    shift 2
+    ;;
+  --storage)
+    STORAGE_POOL="$2"
+    shift 2
+    ;;
+  --image)
+    CUSTOM_IMAGE="$2"
+    shift 2
+    ;;
+  --user)
+    CI_USER="$2"
+    shift 2
+    ;;
+  --password)
+    CI_PASSWORD="$2"
+    shift 2
+    ;;
+  --sshkey)
+    SSH_PUBKEY_FILE="$2"
+    shift 2
+    ;;
+  --yes)
+    SKIP_CONFIRM=true
+    shift
+    ;;
+  -h | --help) usage ;;
+  *) error "Unknown option: $1" ;;
   esac
 done
 
 # ── Proxmox check ───────────────────────────────────────────────────
 check_proxmox() {
-  if ! command -v qm &> /dev/null; then
+  if ! command -v qm &>/dev/null; then
     error "This script must be run on a Proxmox host (qm not found)"
   fi
-  if ! command -v pvesm &> /dev/null; then
+  if ! command -v pvesm &>/dev/null; then
     error "This script must be run on a Proxmox host (pvesm not found)"
   fi
   log "Detected Proxmox host: $(hostname)"
@@ -146,9 +146,9 @@ check_proxmox() {
 # Returns: sets TEMPLATE_VMID and TEMPLATE_ALREADY_EXISTS
 check_vmid_exists() {
   local vmid=$1
-  if qm status "$vmid" &> /dev/null; then
+  if qm status "$vmid" &>/dev/null; then
     # Check if it's already a template
-    if qm config "$vmid" 2> /dev/null | grep -q "^template: 1"; then
+    if qm config "$vmid" 2>/dev/null | grep -q "^template: 1"; then
       return 0 # exists as template
     fi
     return 1 # exists but not a template
@@ -161,16 +161,16 @@ pick_vmid() {
     # Provided via --vmid, just validate
     check_vmid_exists "$TEMPLATE_VMID" && rc=$? || rc=$?
     case $rc in
-      0)
-        local existing_name
-        existing_name=$(qm config "$TEMPLATE_VMID" 2> /dev/null | grep "^name:" | awk '{print $2}')
-        warn "VM ID ${TEMPLATE_VMID} already exists as template '${existing_name}'"
-        log "Re-running will update credentials and skip creation (idempotent)"
-        TEMPLATE_ALREADY_EXISTS=true
-        ;;
-      1)
-        error "VM ID ${TEMPLATE_VMID} exists but is NOT a template. Remove it first or pick a different ID."
-        ;;
+    0)
+      local existing_name
+      existing_name=$(qm config "$TEMPLATE_VMID" 2>/dev/null | grep "^name:" | awk '{print $2}')
+      warn "VM ID ${TEMPLATE_VMID} already exists as template '${existing_name}'"
+      log "Re-running will update credentials and skip creation (idempotent)"
+      TEMPLATE_ALREADY_EXISTS=true
+      ;;
+    1)
+      error "VM ID ${TEMPLATE_VMID} exists but is NOT a template. Remove it first or pick a different ID."
+      ;;
     esac
     log "Using VMID: $TEMPLATE_VMID"
     return
@@ -198,71 +198,71 @@ pick_vmid() {
 
     check_vmid_exists "$input_vmid" && rc=$? || rc=$?
     case $rc in
-      0)
-        local existing_name
-        existing_name=$(qm config "$input_vmid" 2> /dev/null | grep "^name:" | awk '{print $2}')
-        warn "VM ID ${input_vmid} already exists as template '${existing_name}'"
-        echo ""
-        echo "  1) Keep it — skip creation (idempotent re-run)"
-        echo "  2) Destroy and recreate"
-        echo "  3) Pick a different VMID"
-        echo ""
-        local action
-        read -rp "  Select [1-3] (default: 1): " action
-        action="${action:-1}"
-        case $action in
-          1)
-            TEMPLATE_VMID="$input_vmid"
-            TEMPLATE_ALREADY_EXISTS=true
-            log "Will keep existing template ${TEMPLATE_VMID}"
-            return
-            ;;
-          2)
-            log "Will destroy VM ${input_vmid} and recreate"
-            qm destroy "$input_vmid" --purge
-            log "VM ${input_vmid} destroyed"
-            TEMPLATE_VMID="$input_vmid"
-            return
-            ;;
-          3)
-            continue
-            ;;
-          *)
-            echo -e "  ${RED}Invalid selection.${NC}"
-            continue
-            ;;
-        esac
-        ;;
+    0)
+      local existing_name
+      existing_name=$(qm config "$input_vmid" 2>/dev/null | grep "^name:" | awk '{print $2}')
+      warn "VM ID ${input_vmid} already exists as template '${existing_name}'"
+      echo ""
+      echo "  1) Keep it — skip creation (idempotent re-run)"
+      echo "  2) Destroy and recreate"
+      echo "  3) Pick a different VMID"
+      echo ""
+      local action
+      read -rp "  Select [1-3] (default: 1): " action
+      action="${action:-1}"
+      case $action in
       1)
-        warn "VM ID ${input_vmid} exists but is NOT a template (it's a regular VM)"
-        echo ""
-        echo "  1) Pick a different VMID"
-        echo "  2) Destroy it and use this VMID"
-        echo ""
-        local action
-        read -rp "  Select [1-2] (default: 1): " action
-        action="${action:-1}"
-        case $action in
-          1) continue ;;
-          2)
-            log "Will destroy VM ${input_vmid} and recreate"
-            qm stop "$input_vmid" --skiplock 2> /dev/null || true
-            qm destroy "$input_vmid" --purge
-            log "VM ${input_vmid} destroyed"
-            TEMPLATE_VMID="$input_vmid"
-            return
-            ;;
-          *)
-            echo -e "  ${RED}Invalid selection.${NC}"
-            continue
-            ;;
-        esac
+        TEMPLATE_VMID="$input_vmid"
+        TEMPLATE_ALREADY_EXISTS=true
+        log "Will keep existing template ${TEMPLATE_VMID}"
+        return
         ;;
       2)
-        # Does not exist — good to go
+        log "Will destroy VM ${input_vmid} and recreate"
+        qm destroy "$input_vmid" --purge
+        log "VM ${input_vmid} destroyed"
         TEMPLATE_VMID="$input_vmid"
         return
         ;;
+      3)
+        continue
+        ;;
+      *)
+        echo -e "  ${RED}Invalid selection.${NC}"
+        continue
+        ;;
+      esac
+      ;;
+    1)
+      warn "VM ID ${input_vmid} exists but is NOT a template (it's a regular VM)"
+      echo ""
+      echo "  1) Pick a different VMID"
+      echo "  2) Destroy it and use this VMID"
+      echo ""
+      local action
+      read -rp "  Select [1-2] (default: 1): " action
+      action="${action:-1}"
+      case $action in
+      1) continue ;;
+      2)
+        log "Will destroy VM ${input_vmid} and recreate"
+        qm stop "$input_vmid" --skiplock 2>/dev/null || true
+        qm destroy "$input_vmid" --purge
+        log "VM ${input_vmid} destroyed"
+        TEMPLATE_VMID="$input_vmid"
+        return
+        ;;
+      *)
+        echo -e "  ${RED}Invalid selection.${NC}"
+        continue
+        ;;
+      esac
+      ;;
+    2)
+      # Does not exist — good to go
+      TEMPLATE_VMID="$input_vmid"
+      return
+      ;;
     esac
   done
 
@@ -312,7 +312,7 @@ pick_storage() {
     statuses+=("$status")
     totals+=("$total")
     used_pcts+=("$pct")
-  done < <(pvesm status 2> /dev/null | awk 'NR>1')
+  done < <(pvesm status 2>/dev/null | awk 'NR>1')
 
   if [[ ${#storages[@]} -eq 0 ]]; then
     error "No storage pools found on this host"
@@ -351,13 +351,13 @@ pick_storage() {
 pick_os_type() {
   if [[ -n "$OS_TYPE" ]]; then
     case "$OS_TYPE" in
-      ubuntu|omarchy)
-        log "Using OS type: $OS_TYPE"
-        return
-        ;;
-      *)
-        error "Unsupported OS type: $OS_TYPE (supported: ubuntu, omarchy)"
-        ;;
+    ubuntu | omarchy)
+      log "Using OS type: $OS_TYPE"
+      return
+      ;;
+    *)
+      error "Unsupported OS type: $OS_TYPE (supported: ubuntu, omarchy)"
+      ;;
     esac
   fi
 
@@ -373,9 +373,17 @@ pick_os_type() {
     read -rp "  Select OS [1-2] (default: 1): " choice
     choice="${choice:-1}"
     case $choice in
-      1) OS_TYPE="ubuntu"; log "Selected: Ubuntu"; break ;;
-      2) OS_TYPE="omarchy"; log "Selected: Omarchy"; break ;;
-      *) echo -e "  ${RED}Invalid selection.${NC}" ;;
+    1)
+      OS_TYPE="ubuntu"
+      log "Selected: Ubuntu"
+      break
+      ;;
+    2)
+      OS_TYPE="omarchy"
+      log "Selected: Omarchy"
+      break
+      ;;
+    *) echo -e "  ${RED}Invalid selection.${NC}" ;;
     esac
   done
 }
@@ -393,12 +401,12 @@ pick_omarchy_version() {
     read -rp "  Select version [1] (default: 1): " choice
     choice="${choice:-1}"
     case $choice in
-      1)
-        OMARCHY_VERSION="4.0.3"
-        OMARCHY_LABEL="4.0"
-        break
-        ;;
-      *) echo -e "  ${RED}Invalid selection.${NC}" ;;
+    1)
+      OMARCHY_VERSION="4.0.3"
+      OMARCHY_LABEL="4.0"
+      break
+      ;;
+    *) echo -e "  ${RED}Invalid selection.${NC}" ;;
     esac
   done
 
@@ -424,7 +432,7 @@ generate_omarchy_cidata() {
   fi
 
   # Create user_configuration.json
-  cat > "${cidir}/user_configuration.json" << 'USERCONFIG'
+  cat >"${cidir}/user_configuration.json" <<'USERCONFIG'
 {
   "hostname": "omarchy",
   "timezone": "UTC",
@@ -433,7 +441,7 @@ generate_omarchy_cidata() {
 USERCONFIG
 
   # Create user_credentials.json
-  cat > "${cidir}/user_credentials.json" << CREDCONS
+  cat >"${cidir}/user_credentials.json" <<CREDCONS
 {
   "username": "${CI_USER}",
   "password_hash": "${password_hash}"
@@ -442,14 +450,14 @@ CREDCONS
 
   # Create authorized_keys if SSH key provided
   if [[ -n "$SSH_PUBKEY" ]]; then
-    echo "$SSH_PUBKEY" > "${cidir}/authorized_keys"
+    echo "$SSH_PUBKEY" >"${cidir}/authorized_keys"
     log "Added SSH public key to cidata"
   else
     touch "${cidir}/authorized_keys"
   fi
 
   # Check for xorriso
-  if ! command -v xorriso &> /dev/null; then
+  if ! command -v xorriso &>/dev/null; then
     log "Installing xorriso for ISO creation..."
     apt-get update -qq
     apt-get install -y -qq xorriso
@@ -502,7 +510,7 @@ download_omarchy_iso() {
 
   log "Downloading Omarchy ${OMARCHY_VERSION} from: $iso_url"
   wget -q --show-progress "$iso_url" -O "$iso_path"
-  
+
   if [[ ! -f "$iso_path" ]]; then
     error "Failed to download Omarchy ISO"
   fi
@@ -536,27 +544,27 @@ pick_ubuntu_version() {
     read -rp "Select Ubuntu version [1-4] (default: 1): " choice
     choice="${choice:-1}"
     case $choice in
-      1)
-        UBUNTU_CODENAME="resolute"
-        UBUNTU_LABEL="26.04"
-        break
-        ;;
-      2)
-        UBUNTU_CODENAME="noble"
-        UBUNTU_LABEL="24.04"
-        break
-        ;;
-      3)
-        UBUNTU_CODENAME="jammy"
-        UBUNTU_LABEL="22.04"
-        break
-        ;;
-      4)
-        UBUNTU_CODENAME="focal"
-        UBUNTU_LABEL="20.04"
-        break
-        ;;
-      *) echo -e "${RED}Invalid selection.${NC}" ;;
+    1)
+      UBUNTU_CODENAME="resolute"
+      UBUNTU_LABEL="26.04"
+      break
+      ;;
+    2)
+      UBUNTU_CODENAME="noble"
+      UBUNTU_LABEL="24.04"
+      break
+      ;;
+    3)
+      UBUNTU_CODENAME="jammy"
+      UBUNTU_LABEL="22.04"
+      break
+      ;;
+    4)
+      UBUNTU_CODENAME="focal"
+      UBUNTU_LABEL="20.04"
+      break
+      ;;
+    *) echo -e "${RED}Invalid selection.${NC}" ;;
     esac
   done
 
@@ -631,41 +639,41 @@ configure_credentials() {
       read -rp "  Select [1-3] (default: 3): " ssh_choice
       ssh_choice="${ssh_choice:-3}"
       case $ssh_choice in
-        1)
-          echo ""
-          read -rp "  Paste your public key: " SSH_PUBKEY
-          if [[ -z "$SSH_PUBKEY" ]]; then
-            warn "Empty key — skipping SSH key configuration"
-            SSH_PUBKEY=""
-          elif [[ ! "$SSH_PUBKEY" =~ ^ssh- ]]; then
-            echo -e "  ${RED}That doesn't look like a valid SSH public key (should start with ssh-).${NC}"
-            SSH_PUBKEY=""
-            continue
-          else
-            log "SSH public key accepted"
-          fi
-          break
-          ;;
-        2)
-          echo ""
-          read -rp "  Path to public key file: " SSH_PUBKEY_FILE
-          # Expand ~ manually
-          SSH_PUBKEY_FILE="${SSH_PUBKEY_FILE/#\~/$HOME}"
-          if [[ ! -f "$SSH_PUBKEY_FILE" ]]; then
-            echo -e "  ${RED}File not found: ${SSH_PUBKEY_FILE}${NC}"
-            continue
-          fi
-          SSH_PUBKEY=$(cat "$SSH_PUBKEY_FILE")
-          log "SSH key loaded from: $SSH_PUBKEY_FILE"
-          break
-          ;;
-        3)
-          warn "No SSH key configured"
-          break
-          ;;
-        *)
-          echo -e "  ${RED}Invalid selection.${NC}"
-          ;;
+      1)
+        echo ""
+        read -rp "  Paste your public key: " SSH_PUBKEY
+        if [[ -z "$SSH_PUBKEY" ]]; then
+          warn "Empty key — skipping SSH key configuration"
+          SSH_PUBKEY=""
+        elif [[ ! "$SSH_PUBKEY" =~ ^ssh- ]]; then
+          echo -e "  ${RED}That doesn't look like a valid SSH public key (should start with ssh-).${NC}"
+          SSH_PUBKEY=""
+          continue
+        else
+          log "SSH public key accepted"
+        fi
+        break
+        ;;
+      2)
+        echo ""
+        read -rp "  Path to public key file: " SSH_PUBKEY_FILE
+        # Expand ~ manually
+        SSH_PUBKEY_FILE="${SSH_PUBKEY_FILE/#\~/$HOME}"
+        if [[ ! -f "$SSH_PUBKEY_FILE" ]]; then
+          echo -e "  ${RED}File not found: ${SSH_PUBKEY_FILE}${NC}"
+          continue
+        fi
+        SSH_PUBKEY=$(cat "$SSH_PUBKEY_FILE")
+        log "SSH key loaded from: $SSH_PUBKEY_FILE"
+        break
+        ;;
+      3)
+        warn "No SSH key configured"
+        break
+        ;;
+      *)
+        echo -e "  ${RED}Invalid selection.${NC}"
+        ;;
       esac
     done
   fi
@@ -685,43 +693,43 @@ configure_credentials() {
 # ── Download cloud image ────────────────────────────────────────────
 download_cloud_image() {
   case "$OS_TYPE" in
-    ubuntu)
-      [[ -n "$CUSTOM_IMAGE" ]] && return
+  ubuntu)
+    [[ -n "$CUSTOM_IMAGE" ]] && return
 
-      mkdir -p /var/lib/vz/template/iso/
+    mkdir -p /var/lib/vz/template/iso/
 
-      if [[ -f "$IMAGE_PATH" ]]; then
-        warn "Image already exists: $IMAGE_PATH"
-        read -rp "Re-download? (y/N): " yn
-        if [[ ! "$yn" =~ ^[Yy]$ ]]; then
-          return
-        fi
-        rm -f "$IMAGE_PATH"
+    if [[ -f "$IMAGE_PATH" ]]; then
+      warn "Image already exists: $IMAGE_PATH"
+      read -rp "Re-download? (y/N): " yn
+      if [[ ! "$yn" =~ ^[Yy]$ ]]; then
+        return
       fi
+      rm -f "$IMAGE_PATH"
+    fi
 
-      local url="https://cloud-images.ubuntu.com/${UBUNTU_CODENAME}/current/${UBUNTU_CODENAME}-server-cloudimg-amd64.img"
-      log "Downloading from: $url"
-      wget -q --show-progress "$url" -O "$IMAGE_PATH"
-      log "Download complete: $IMAGE_PATH"
-      ;;
-    omarchy)
-      download_omarchy_iso
-      local cidata_iso
-      cidata_iso=$(generate_omarchy_cidata)
-      OMARCHY_CIDATA_PATH="$cidata_iso"
-      ;;
+    local url="https://cloud-images.ubuntu.com/${UBUNTU_CODENAME}/current/${UBUNTU_CODENAME}-server-cloudimg-amd64.img"
+    log "Downloading from: $url"
+    wget -q --show-progress "$url" -O "$IMAGE_PATH"
+    log "Download complete: $IMAGE_PATH"
+    ;;
+  omarchy)
+    download_omarchy_iso
+    local cidata_iso
+    cidata_iso=$(generate_omarchy_cidata)
+    OMARCHY_CIDATA_PATH="$cidata_iso"
+    ;;
   esac
 }
 
 # ── Create VM template ──────────────────────────────────────────────
 create_vm_template() {
   case "$OS_TYPE" in
-    ubuntu)
-      create_ubuntu_template
-      ;;
-    omarchy)
-      create_omarchy_template
-      ;;
+  ubuntu)
+    create_ubuntu_template
+    ;;
+  omarchy)
+    create_omarchy_template
+    ;;
   esac
 }
 
@@ -744,7 +752,7 @@ create_ubuntu_template() {
     if [[ -n "$SSH_PUBKEY" ]]; then
       local tmpkey
       tmpkey=$(mktemp)
-      echo "$SSH_PUBKEY" > "$tmpkey"
+      echo "$SSH_PUBKEY" >"$tmpkey"
       qm set "$TEMPLATE_VMID" --sshkeys "$tmpkey"
       rm -f "$tmpkey"
       log "SSH public key updated for user '${CI_USER}'"
@@ -757,7 +765,7 @@ create_ubuntu_template() {
   # ── Fresh creation ──
   log "Creating VM template '${TEMPLATE_NAME}' (ID: ${TEMPLATE_VMID})..."
 
-  if ! command -v virt-customize &> /dev/null; then
+  if ! command -v virt-customize &>/dev/null; then
     log "Installing libguestfs-tools for image customization..."
     apt-get update -qq
     apt-get install -y -qq libguestfs-tools
@@ -801,7 +809,7 @@ create_ubuntu_template() {
   if [[ -n "$SSH_PUBKEY" ]]; then
     local tmpkey
     tmpkey=$(mktemp)
-    echo "$SSH_PUBKEY" > "$tmpkey"
+    echo "$SSH_PUBKEY" >"$tmpkey"
     qm set "$TEMPLATE_VMID" --sshkeys "$tmpkey"
     rm -f "$tmpkey"
     log "SSH public key added for user '${CI_USER}'"
@@ -855,7 +863,7 @@ create_omarchy_template() {
 # shellcheck disable=SC2317
 wait_for_omarchy_install() {
   local vmid="$1"
-  local timeout=1800  # 30 minutes max
+  local timeout=1800 # 30 minutes max
   local interval=15
   local elapsed=0
 
@@ -881,7 +889,7 @@ wait_for_omarchy_install() {
 
     # Check if VM is powered on (still installing)
     if [[ "$status" == "status: running" ]]; then
-      if (( elapsed % 60 == 0 )); then
+      if ((elapsed % 60 == 0)); then
         log "Still installing... (${elapsed}s elapsed)"
       fi
       sleep "$interval"
@@ -923,7 +931,7 @@ finalize_omarchy_template() {
   if [[ -n "$SSH_PUBKEY" ]]; then
     local tmpkey
     tmpkey=$(mktemp)
-    echo "$SSH_PUBKEY" > "$tmpkey"
+    echo "$SSH_PUBKEY" >"$tmpkey"
     qm set "$vmid" --sshkeys "$tmpkey"
     rm -f "$tmpkey"
     log "SSH public key added for user '${CI_USER}'"
@@ -950,10 +958,10 @@ show_summary() {
   [[ "$TEMPLATE_ALREADY_EXISTS" == true ]] && action="Updated"
 
   local tmpl_name
-  tmpl_name=$(qm config "$TEMPLATE_VMID" 2> /dev/null | grep "^name:" | awk '{print $2}')
+  tmpl_name=$(qm config "$TEMPLATE_VMID" 2>/dev/null | grep "^name:" | awk '{print $2}')
   tmpl_name="${tmpl_name:-${TEMPLATE_NAME}}"
 
-  cat << EOF
+  cat <<EOF
 
 ${GREEN}════════════════════════════════════════${NC}
 ${BOLD}  Cloud-Init VM Template ${action}${NC}
@@ -985,8 +993,8 @@ main() {
   # Skip image selection/download if template already exists (idempotent re-run)
   if [[ "$TEMPLATE_ALREADY_EXISTS" != true ]]; then
     case "$OS_TYPE" in
-      ubuntu) pick_ubuntu_version ;;
-      omarchy) pick_omarchy_version ;;
+    ubuntu) pick_ubuntu_version ;;
+    omarchy) pick_omarchy_version ;;
     esac
   fi
 
