@@ -7,9 +7,24 @@ TEMPLATE_VMID="${TEMPLATE_VMID:-9000}"
 TEMPLATE_NAME="${TEMPLATE_NAME:-ubuntu-cloud}"
 NETWORK_BRIDGE="${NETWORK_BRIDGE:-vmbr0}"
 CI_USER="${CI_USER:-ubuntu}"
+OS_TYPE="${OS_TYPE:-ubuntu}"
 CI_PASSWORD=""
 SSH_PUBKEY=""
 SSH_PUBKEY_FILE=""
+STORAGE_POOL=""
+CUSTOM_IMAGE=""
+VMID_FROM_FLAG=false
+TEMPLATE_ALREADY_EXISTS=false
+SKIP_CONFIRM=false
+OMARCHY_VERSION=""
+OMARCHY_CODENAME=""
+OMARCHY_LABEL=""
+OMARCHY_ISO_PATH=""
+OMARCHY_CIDATA_PATH=""
+IMAGE_PATH=""
+IMAGE_FILE=""
+UBUNTU_CODENAME=""
+UBUNTU_LABEL=""
 
 # Colors
 GREEN='\033[0;32m'
@@ -33,24 +48,26 @@ Usage: $(basename "$0") [OPTIONS]
 Create a cloud-init VM template on a Proxmox host.
 
 Options:
-  --vmid ID          VM ID for the template (default: ${TEMPLATE_VMID})
-  --name NAME        Template name (default: auto-generated from image)
-  --bridge BRIDGE    Network bridge (default: ${NETWORK_BRIDGE})
-  --storage POOL     Storage pool (skips interactive picker)
-  --image PATH       Path to an existing cloud image (skips download)
-  --user USER        Default cloud-init username (default: ${CI_USER})
-  --password PASS    Password for the default user (skips interactive prompt)
-  --sshkey PATH      Path to SSH public key file (skips interactive prompt)
-  --yes              Skip confirmation prompt
-  -h, --help         Show this help message
+  --os TYPE        OS type: ubuntu, omarchy (default: ${OS_TYPE})
+  --vmid ID        VM ID for the template (default: ${TEMPLATE_VMID})
+  --name NAME      Template name (default: auto-generated from image)
+  --bridge BRIDGE  Network bridge (default: ${NETWORK_BRIDGE})
+  --storage POOL   Storage pool (skips interactive picker)
+  --image PATH     Path to an existing cloud image (skips download)
+  --user USER      Default cloud-init username (default: ${CI_USER})
+  --password PASS  Password for the default user (skips interactive prompt)
+  --sshkey PATH    Path to SSH public key file (skips interactive prompt)
+  --yes            Skip confirmation prompt
+  -h, --help       Show this help message
 
 Environment variables:
-  TEMPLATE_VMID      Same as --vmid
-  TEMPLATE_NAME      Same as --name
-  NETWORK_BRIDGE     Same as --bridge
-  STORAGE_POOL       Same as --storage
-  CI_USER            Same as --user
-  CI_PASSWORD        Same as --password
+  TEMPLATE_VMID    Same as --vmid
+  TEMPLATE_NAME    Same as --name
+  NETWORK_BRIDGE   Same as --bridge
+  STORAGE_POOL     Same as --storage
+  CI_USER          Same as --user
+  OS_TYPE          Same as --os
+  CI_PASSWORD      Same as --password
 
 Examples:
   $(basename "$0")                          # Interactive mode
@@ -69,6 +86,10 @@ TEMPLATE_ALREADY_EXISTS=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --os)
+      OS_TYPE="$2"
+      shift 2
+      ;;
     --vmid)
       TEMPLATE_VMID="$2"
       VMID_FROM_FLAG=true
@@ -327,6 +348,170 @@ pick_storage() {
   log "Selected storage: $STORAGE_POOL"
 }
 
+# ── OS type picker ───────────────────────────────────────────────────
+pick_os_type() {
+  if [[ -n "$OS_TYPE" ]]; then
+    case "$OS_TYPE" in
+      ubuntu|omarchy)
+        log "Using OS type: $OS_TYPE"
+        return
+        ;;
+      *)
+        error "Unsupported OS type: $OS_TYPE (supported: ubuntu, omarchy)"
+        ;;
+    esac
+  fi
+
+  echo ""
+  echo -e "${BOLD}Select operating system:${NC}"
+  echo ""
+  echo "  1) Ubuntu (cloud-init image)"
+  echo "  2) Omarchy (Arch Linux + Hyprland)"
+  echo ""
+
+  local choice
+  while true; do
+    read -rp "  Select OS [1-2] (default: 1): " choice
+    choice="${choice:-1}"
+    case $choice in
+      1) OS_TYPE="ubuntu"; log "Selected: Ubuntu"; break ;;
+      2) OS_TYPE="omarchy"; log "Selected: Omarchy"; break ;;
+      *) echo -e "  ${RED}Invalid selection.${NC}" ;;
+    esac
+  done
+}
+
+# ── Omarchy version picker ───────────────────────────────────────────
+pick_omarchy_version() {
+  echo ""
+  echo -e "${BOLD}Available Omarchy versions:${NC}"
+  echo ""
+  echo "  1) Omarchy Quattro 4.0 (latest stable)"
+  echo ""
+
+  local choice
+  while true; do
+    read -rp "  Select version [1] (default: 1): " choice
+    choice="${choice:-1}"
+    case $choice in
+      1)
+        OMARCHY_VERSION="4.0.3"
+        OMARCHY_LABEL="4.0"
+        break
+        ;;
+      *) echo -e "  ${RED}Invalid selection.${NC}" ;;
+    esac
+  done
+
+  # Auto-set template name if still at default
+  if [[ "$TEMPLATE_NAME" == "ubuntu-cloud" ]]; then
+    TEMPLATE_NAME="omarchy-${OMARCHY_LABEL}-cloud"
+  fi
+
+  log "Selected Omarchy ${OMARCHY_LABEL} (${OMARCHY_VERSION})"
+}
+
+# ── Generate cidata ISO for Omarchy ──────────────────────────────────
+generate_omarchy_cidata() {
+  local cidir
+  cidir=$(mktemp -d)
+
+  log "Generating Omarchy cidata ISO in ${cidir}..."
+
+  # Generate password hash if provided
+  local password_hash=""
+  if [[ -n "$CI_PASSWORD" ]]; then
+    password_hash=$(openssl passwd -6 "$CI_PASSWORD")
+  fi
+
+  # Create user_configuration.json
+  cat > "${cidir}/user_configuration.json" << 'USERCONFIG'
+{
+  "hostname": "omarchy",
+  "timezone": "UTC",
+  "keyboard_layout": "us"
+}
+USERCONFIG
+
+  # Create user_credentials.json
+  cat > "${cidir}/user_credentials.json" << CREDCONS
+{
+  "username": "${CI_USER}",
+  "password_hash": "${password_hash}"
+}
+CREDCONS
+
+  # Create authorized_keys if SSH key provided
+  if [[ -n "$SSH_PUBKEY" ]]; then
+    echo "$SSH_PUBKEY" > "${cidir}/authorized_keys"
+    log "Added SSH public key to cidata"
+  else
+    touch "${cidir}/authorized_keys"
+  fi
+
+  # Check for xorriso
+  if ! command -v xorriso &> /dev/null; then
+    log "Installing xorriso for ISO creation..."
+    apt-get update -qq
+    apt-get install -y -qq xorriso
+  fi
+
+  # Build ISO
+  local cidata_iso="${cidir}/cidata.iso"
+  xorriso -as genisoimage \
+    -output "$cidata_iso" \
+    -volid CIDATA \
+    -joliet \
+    -rock \
+    "${cidir}/user_configuration.json" \
+    "${cidir}/user_credentials.json" \
+    "${cidir}/authorized_keys" \
+    2>&1 | tail -5
+
+  if [[ ! -f "$cidata_iso" ]]; then
+    error "Failed to create cidata ISO"
+  fi
+
+  # Move to Proxmox ISO store
+  local final_path="/var/lib/vz/template/iso/omarchy-cidata.iso"
+  mv "$cidata_iso" "$final_path"
+  chmod 644 "$final_path"
+
+  # Cleanup temp dir (but not the ISO)
+  rm -rf "${cidir}/user_configuration.json" "${cidir}/user_credentials.json" "${cidir}/authorized_keys"
+
+  log "cidata ISO created: $final_path"
+  echo "$final_path"
+}
+
+# ── Download Omarchy ISO ─────────────────────────────────────────────
+download_omarchy_iso() {
+  mkdir -p /var/lib/vz/template/iso/
+
+  local iso_url="https://iso.omarchy.org/omarchy-${OMARCHY_VERSION}.iso"
+  local iso_path="/var/lib/vz/template/iso/omarchy-${OMARCHY_VERSION}.iso"
+
+  if [[ -f "$iso_path" ]]; then
+    warn "Omarchy ISO already exists: $iso_path"
+    read -rp "Re-download? (y/N): " yn
+    if [[ ! "$yn" =~ ^[Yy]$ ]]; then
+      OMARCHY_ISO_PATH="$iso_path"
+      return
+    fi
+    rm -f "$iso_path"
+  fi
+
+  log "Downloading Omarchy ${OMARCHY_VERSION} from: $iso_url"
+  wget -q --show-progress "$iso_url" -O "$iso_path"
+  
+  if [[ ! -f "$iso_path" ]]; then
+    error "Failed to download Omarchy ISO"
+  fi
+
+  OMARCHY_ISO_PATH="$iso_path"
+  log "Download complete: $OMARCHY_ISO_PATH"
+}
+
 # ── Ubuntu version picker ────────────────────────────────────────────
 pick_ubuntu_version() {
   if [[ -n "$CUSTOM_IMAGE" ]]; then
@@ -341,27 +526,33 @@ pick_ubuntu_version() {
   echo ""
   echo -e "${BOLD}Available Ubuntu cloud images:${NC}"
   echo ""
-  echo "  1) Ubuntu 24.04 LTS (Noble Numbat)"
-  echo "  2) Ubuntu 22.04 LTS (Jammy Jellyfish)"
-  echo "  3) Ubuntu 20.04 LTS (Focal Fossa)"
+  echo "  1) Ubuntu 26.04 LTS (Resolute Raccoon)"
+  echo "  2) Ubuntu 24.04 LTS (Noble Numbat)"
+  echo "  3) Ubuntu 22.04 LTS (Jammy Jellyfish)"
+  echo "  4) Ubuntu 20.04 LTS (Focal Fossa)"
   echo ""
 
   local choice
   while true; do
-    read -rp "Select Ubuntu version [1-3] (default: 1): " choice
+    read -rp "Select Ubuntu version [1-4] (default: 1): " choice
     choice="${choice:-1}"
     case $choice in
       1)
+        UBUNTU_CODENAME="resolute"
+        UBUNTU_LABEL="26.04"
+        break
+        ;;
+      2)
         UBUNTU_CODENAME="noble"
         UBUNTU_LABEL="24.04"
         break
         ;;
-      2)
+      3)
         UBUNTU_CODENAME="jammy"
         UBUNTU_LABEL="22.04"
         break
         ;;
-      3)
+      4)
         UBUNTU_CODENAME="focal"
         UBUNTU_LABEL="20.04"
         break
@@ -494,45 +685,63 @@ configure_credentials() {
 
 # ── Download cloud image ────────────────────────────────────────────
 download_cloud_image() {
-  [[ -n "$CUSTOM_IMAGE" ]] && return
+  case "$OS_TYPE" in
+    ubuntu)
+      [[ -n "$CUSTOM_IMAGE" ]] && return
 
-  mkdir -p /var/lib/vz/template/iso/
+      mkdir -p /var/lib/vz/template/iso/
 
-  if [[ -f "$IMAGE_PATH" ]]; then
-    warn "Image already exists: $IMAGE_PATH"
-    read -rp "Re-download? (y/N): " yn
-    if [[ ! "$yn" =~ ^[Yy]$ ]]; then
-      return
-    fi
-    rm -f "$IMAGE_PATH"
-  fi
+      if [[ -f "$IMAGE_PATH" ]]; then
+        warn "Image already exists: $IMAGE_PATH"
+        read -rp "Re-download? (y/N): " yn
+        if [[ ! "$yn" =~ ^[Yy]$ ]]; then
+          return
+        fi
+        rm -f "$IMAGE_PATH"
+      fi
 
-  local url="https://cloud-images.ubuntu.com/${UBUNTU_CODENAME}/current/${UBUNTU_CODENAME}-server-cloudimg-amd64.img"
-  log "Downloading from: $url"
-  wget -q --show-progress "$url" -O "$IMAGE_PATH"
-  log "Download complete: $IMAGE_PATH"
+      local url="https://cloud-images.ubuntu.com/${UBUNTU_CODENAME}/current/${UBUNTU_CODENAME}-server-cloudimg-amd64.img"
+      log "Downloading from: $url"
+      wget -q --show-progress "$url" -O "$IMAGE_PATH"
+      log "Download complete: $IMAGE_PATH"
+      ;;
+    omarchy)
+      download_omarchy_iso
+      local cidata_iso
+      cidata_iso=$(generate_omarchy_cidata)
+      OMARCHY_CIDATA_PATH="$cidata_iso"
+      ;;
+  esac
 }
 
 # ── Create VM template ──────────────────────────────────────────────
 create_vm_template() {
+  case "$OS_TYPE" in
+    ubuntu)
+      create_ubuntu_template
+      ;;
+    omarchy)
+      create_omarchy_template
+      ;;
+  esac
+}
+
+# ── Ubuntu template creation ─────────────────────────────────────────
+create_ubuntu_template() {
   # ── Idempotent: template already exists ──
   if [[ "$TEMPLATE_ALREADY_EXISTS" == true ]]; then
     log "Template ${TEMPLATE_VMID} already exists — updating cloud-init credentials only"
 
-    # Update cloud-init user
     qm set "$TEMPLATE_VMID" --ciuser "$CI_USER"
     log "Cloud-init user set to '${CI_USER}'"
 
-    # Keep cloud-init networking defaulted to DHCP
     qm set "$TEMPLATE_VMID" --ipconfig0 ip=dhcp,ip6=dhcp
 
-    # Update password
     if [[ -n "$CI_PASSWORD" ]]; then
       qm set "$TEMPLATE_VMID" --cipassword "$(openssl passwd -6 "$CI_PASSWORD")"
       log "Password updated for user '${CI_USER}'"
     fi
 
-    # Update SSH key
     if [[ -n "$SSH_PUBKEY" ]]; then
       local tmpkey
       tmpkey=$(mktemp)
@@ -549,14 +758,12 @@ create_vm_template() {
   # ── Fresh creation ──
   log "Creating VM template '${TEMPLATE_NAME}' (ID: ${TEMPLATE_VMID})..."
 
-  # Install virt-customize if needed
   if ! command -v virt-customize &> /dev/null; then
     log "Installing libguestfs-tools for image customization..."
     apt-get update -qq
     apt-get install -y -qq libguestfs-tools
   fi
 
-  # Pre-install qemu-guest-agent + sanitize guest identity/state
   log "Customizing cloud image (installing qemu-guest-agent + template cleanup)..."
   virt-customize -a "$IMAGE_PATH" \
     --install qemu-guest-agent \
@@ -568,7 +775,6 @@ create_vm_template() {
     --run-command "rm -f /var/lib/dhcp/*.leases" \
     --run-command "rm -rf /var/lib/cloud/*"
 
-  # Create VM
   qm create "$TEMPLATE_VMID" \
     --name "$TEMPLATE_NAME" \
     --memory 2048 \
@@ -576,44 +782,23 @@ create_vm_template() {
     --net0 "virtio,bridge=${NETWORK_BRIDGE}" \
     --scsihw virtio-scsi-pci
 
-  # Import disk
   qm importdisk "$TEMPLATE_VMID" "$IMAGE_PATH" "$STORAGE_POOL"
-
-  # Attach disk
   qm set "$TEMPLATE_VMID" --scsi0 "${STORAGE_POOL}:vm-${TEMPLATE_VMID}-disk-0"
-
-  # Cloud-init drive
   qm set "$TEMPLATE_VMID" --ide2 "${STORAGE_POOL}:cloudinit"
-
-  # Boot from scsi0
   qm set "$TEMPLATE_VMID" --boot c --bootdisk scsi0
-
-  # Serial console
   qm set "$TEMPLATE_VMID" --serial0 socket --vga serial0
-
-  # QEMU guest agent
   qm set "$TEMPLATE_VMID" --agent enabled=1
-
-  # q35 machine type
   qm set "$TEMPLATE_VMID" --machine q35
-
-  # UEFI boot
   qm set "$TEMPLATE_VMID" --bios ovmf \
     --efidisk0 "${STORAGE_POOL}:1,efitype=4m,pre-enrolled-keys=1"
-
-  # Default cloud-init user
   qm set "$TEMPLATE_VMID" --ciuser "$CI_USER"
-
-  # Default networking: DHCP via cloud-init
   qm set "$TEMPLATE_VMID" --ipconfig0 ip=dhcp,ip6=dhcp
 
-  # Cloud-init password
   if [[ -n "$CI_PASSWORD" ]]; then
     qm set "$TEMPLATE_VMID" --cipassword "$(openssl passwd -6 "$CI_PASSWORD")"
     log "Password set for user '${CI_USER}'"
   fi
 
-  # SSH public key
   if [[ -n "$SSH_PUBKEY" ]]; then
     local tmpkey
     tmpkey=$(mktemp)
@@ -623,13 +808,141 @@ create_vm_template() {
     log "SSH public key added for user '${CI_USER}'"
   fi
 
-  # Resize disk to 20 GB
   qm resize "$TEMPLATE_VMID" scsi0 20G
-
-  # Convert to template
   qm template "$TEMPLATE_VMID"
 
   log "Template '${TEMPLATE_NAME}' (ID: ${TEMPLATE_VMID}) created successfully on storage '${STORAGE_POOL}'"
+}
+
+# ── Omarchy template creation ────────────────────────────────────────
+create_omarchy_template() {
+  log "Creating Omarchy VM for template (ID: ${TEMPLATE_VMID})..."
+
+  # Create VM with UEFI, Omarchy ISO, and cidata ISO
+  qm create "$TEMPLATE_VMID" \
+    --name "omarchy-installer-${TEMPLATE_VMID}" \
+    --memory 8192 \
+    --cores 4 \
+    --net0 "virtio,bridge=${NETWORK_BRIDGE}" \
+    --scsihw virtio-scsi-single \
+    --bios ovmf \
+    --machine q35 \
+    --ostype l26 \
+    --serial0 socket \
+    --vga serial0
+
+  # EFI disk
+  qm set "$TEMPLATE_VMID" --efidisk0 "${STORAGE_POOL}:0,efitype=4m,pre-enrolled-keys=0"
+
+  # Empty disk for install target
+  qm set "$TEMPLATE_VMID" --scsi0 "${STORAGE_POOL}:40,discard=on,iothread=1"
+
+  # Omarchy ISO
+  qm set "$TEMPLATE_VMID" --ide2 "${OMARCHY_ISO_PATH},media=cdrom"
+
+  # cidata ISO
+  qm set "$TEMPLATE_VMID" --ide3 "${OMARCHY_CIDATA_PATH},media=cdrom"
+
+  # Boot order: CD-ROM first (for ISO install)
+  qm set "$TEMPLATE_VMID" --boot order='ide2;scsi0'
+
+  log "VM ${TEMPLATE_VMID} created — starting unattended install..."
+
+  # Start VM and wait for install to complete
+  wait_for_omarchy_install "$TEMPLATE_VMID"
+}
+
+# ── Wait for Omarchy install to complete ─────────────────────────────
+# shellcheck disable=SC2317
+wait_for_omarchy_install() {
+  local vmid="$1"
+  local timeout=1800  # 30 minutes max
+  local interval=15
+  local elapsed=0
+
+  # Start the VM
+  qm start "$vmid"
+  log "VM ${vmid} started — waiting for install to complete..."
+
+  while [[ $elapsed -lt $timeout ]]; do
+    # Check if VM is running
+    local status
+    status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
+
+    if [[ -z "$status" ]]; then
+      error "VM ${vmid} not found or status check failed"
+      return 1
+    fi
+
+    # Check if VM is powered off (install complete)
+    if [[ "$status" == "status: stopped" ]]; then
+      log "VM ${vmid} stopped — install likely complete"
+      break
+    fi
+
+    # Check if VM is powered on (still installing)
+    if [[ "$status" == "status: running" ]]; then
+      if (( elapsed % 60 == 0 )); then
+        log "Still installing... (${elapsed}s elapsed)"
+      fi
+      sleep "$interval"
+      elapsed=$((elapsed + interval))
+      continue
+    fi
+
+    error "Unexpected VM status: $status"
+    return 1
+  done
+
+  if [[ $elapsed -ge $timeout ]]; then
+    error "Install timed out after ${timeout}s"
+    qm shutdown "$vmid" 2>/dev/null
+    return 1
+  fi
+
+  log "Install complete (${elapsed}s elapsed)"
+}
+
+# ── Finalize Omarchy template ────────────────────────────────────────
+finalize_omarchy_template() {
+  local vmid="$1"
+
+  # Remove Omarchy ISO, add cloud-init CDROM
+  qm set "$vmid" --ide2 "none,media=cdrom"
+  qm set "$vmid" --ide3 "none,media=cdrom"
+  qm set "$vmid" --ide2 "${STORAGE_POOL}:cloudinit,media=cdrom"
+
+  # Set cloud-init parameters
+  qm set "$vmid" --ciuser "$CI_USER"
+  qm set "$vmid" --ipconfig0 ip=dhcp,ip6=dhcp
+
+  if [[ -n "$CI_PASSWORD" ]]; then
+    qm set "$vmid" --cipassword "$(openssl passwd -6 "$CI_PASSWORD")"
+    log "Password set for user '${CI_USER}'"
+  fi
+
+  if [[ -n "$SSH_PUBKEY" ]]; then
+    local tmpkey
+    tmpkey=$(mktemp)
+    echo "$SSH_PUBKEY" > "$tmpkey"
+    qm set "$vmid" --sshkeys "$tmpkey"
+    rm -f "$tmpkey"
+    log "SSH public key added for user '${CI_USER}'"
+  fi
+
+  # Enable QEMU guest agent
+  qm set "$vmid" --agent enabled=1
+
+  # Resize disk to 40G for Omarchy
+  qm resize "$vmid" scsi0 40G
+
+  # Convert to template
+  qm template "$vmid"
+
+  # Rename to final name
+  qm set "$vmid" --name "$TEMPLATE_NAME"
+
+  log "Template '${TEMPLATE_NAME}' (ID: ${vmid}) created successfully"
 }
 
 # ── Summary ──────────────────────────────────────────────────────────
@@ -647,12 +960,13 @@ ${GREEN}════════════════════════
 ${BOLD}  Cloud-Init VM Template ${action}${NC}
 ${GREEN}════════════════════════════════════════${NC}
 
-  Template ID:    ${TEMPLATE_VMID}
-  Template Name:  ${tmpl_name}
-  Default User:   ${CI_USER}
-  Password Auth:  $(if [[ -n "$CI_PASSWORD" ]]; then echo "Yes"; else echo "No"; fi)
-  SSH Key Auth:   $(if [[ -n "$SSH_PUBKEY" ]]; then echo "Yes"; else echo "No"; fi)
-  Proxmox Host:   $(hostname)
+  OS Type:      ${OS_TYPE}
+  Template ID:  ${TEMPLATE_VMID}
+  Template Name: ${tmpl_name}
+  Default User: ${CI_USER}
+  Password Auth: $(if [[ -n "$CI_PASSWORD" ]]; then echo "Yes"; else echo "No"; fi)
+  SSH Key Auth:  $(if [[ -n "$SSH_PUBKEY" ]]; then echo "Yes"; else echo "No"; fi)
+  Proxmox Host:  $(hostname)
 
 ${YELLOW}Clone example:${NC}
   qm clone ${TEMPLATE_VMID} <NEW_VMID> --name <VM_NAME> --full
@@ -666,11 +980,15 @@ EOF
 main() {
   check_proxmox
   pick_vmid
+  pick_os_type
   pick_storage
 
   # Skip image selection/download if template already exists (idempotent re-run)
   if [[ "$TEMPLATE_ALREADY_EXISTS" != true ]]; then
-    pick_ubuntu_version
+    case "$OS_TYPE" in
+      ubuntu) pick_ubuntu_version ;;
+      omarchy) pick_omarchy_version ;;
+    esac
   fi
 
   configure_credentials
@@ -682,12 +1000,17 @@ main() {
     else
       echo -e "${BOLD}Ready to create template:${NC}"
     fi
+    echo "  OS:      ${OS_TYPE}"
     echo "  VMID:    ${TEMPLATE_VMID}"
     if [[ "$TEMPLATE_ALREADY_EXISTS" != true ]]; then
       echo "  Name:    ${TEMPLATE_NAME}"
       echo "  Storage: ${STORAGE_POOL}"
       echo "  Bridge:  ${NETWORK_BRIDGE}"
-      echo "  Image:   ${IMAGE_PATH}"
+      if [[ "$OS_TYPE" == "ubuntu" ]]; then
+        echo "  Image:   ${IMAGE_PATH}"
+      else
+        echo "  Version: ${OMARCHY_LABEL} (${OMARCHY_VERSION})"
+      fi
     fi
     echo "  User:    ${CI_USER}"
     echo "  Password:$(if [[ -n "$CI_PASSWORD" ]]; then echo " ****"; else echo " (none)"; fi)"
@@ -704,6 +1027,12 @@ main() {
     download_cloud_image
   fi
   create_vm_template
+
+  # Finalize Omarchy template (remove ISOs, add cloud-init, convert)
+  if [[ "$OS_TYPE" == "omarchy" ]]; then
+    finalize_omarchy_template "$TEMPLATE_VMID"
+  fi
+
   show_summary
 }
 
