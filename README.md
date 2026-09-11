@@ -182,13 +182,14 @@ sudo ./create-cloud-template.sh \
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `--os TYPE` | OS type: `ubuntu` or `omarchy` | `ubuntu` |
 | `--vmid ID` | VM ID for the template | `9000` |
 | `--name NAME` | Template name | Auto-generated from image |
 | `--bridge BRIDGE` | Network bridge | `vmbr0` |
 | `--storage POOL` | Storage pool name | Interactive picker |
 | `--image PATH` | Path to existing cloud image | Downloads from Ubuntu |
 | `--user USER` | Default cloud-init username | `ubuntu` |
-| `--password PASS` | Password for default user | Interactive prompt |
+| `--password PASS` | Password for default user (required for Omarchy) | Interactive prompt |
 | `--sshkey PATH` | Path to SSH public key file | Interactive prompt |
 | `--yes` | Skip confirmation prompt | `false` |
 | `-h, --help` | Show help message | - |
@@ -343,6 +344,10 @@ Check your internet connection. You can also download the image manually and use
 wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
 sudo ./create-cloud-template.sh --image ./noble-server-cloudimg-amd64.img
 ```
+
+### Omarchy installer: `user_credentials.json contains no users`
+
+The cidata drive must use Omarchy's archinstall schema (`users[]` with `enc_password` and `username`), not a homemade `{username, password_hash}` object. Re-run this script after pulling the fix. Omarchy unattended install **requires** `--password` (the ISO uses that hash for both the user and root). Do not place an empty `authorized_keys` on the cidata drive — omit the file unless you pass `--sshkey`.
 
 ### Cannot SSH into Cloned VM
 

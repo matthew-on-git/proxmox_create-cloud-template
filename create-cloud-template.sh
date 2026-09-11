@@ -20,6 +20,7 @@ OMARCHY_VERSION=""
 OMARCHY_LABEL=""
 OMARCHY_ISO_PATH=""
 OMARCHY_CIDATA_PATH=""
+OMARCHY_DISK_GB="${OMARCHY_DISK_GB:-40}"
 IMAGE_PATH=""
 IMAGE_FILE=""
 UBUNTU_CODENAME=""
@@ -63,7 +64,7 @@ Options:
   --storage POOL   Storage pool (skips interactive picker)
   --image PATH     Path to an existing cloud image (skips download)
   --user USER      Default cloud-init username (default: ${CI_USER})
-  --password PASS  Password for the default user (skips interactive prompt)
+  --password PASS  Password for the default user (required for Omarchy)
   --sshkey PATH    Path to SSH public key file (skips interactive prompt)
   --yes            Skip confirmation prompt
   -h, --help       Show this help message
@@ -428,76 +429,221 @@ pick_omarchy_version() {
 }
 
 # ── Generate cidata ISO for Omarchy ──────────────────────────────────
+# Writes the files the Omarchy ISO configurator itself emits, so autoinstall
+# can skip the wizard. Schema is owned by omarchy-iso (users[] + full-disk
+# default_layout). Sets OMARCHY_CIDATA_PATH; do not capture stdout.
 generate_omarchy_cidata() {
+  if [[ -z "$CI_PASSWORD" ]]; then
+    error "Omarchy unattended install requires a password (used as the user and root account hash)"
+  fi
+  if [[ ! "$OMARCHY_DISK_GB" =~ ^[0-9]+$ ]] || ((OMARCHY_DISK_GB < 32)); then
+    error "OMARCHY_DISK_GB must be an integer >= 32 (got: ${OMARCHY_DISK_GB})"
+  fi
+  if ! command -v python3 &>/dev/null; then
+    error "python3 is required to generate Omarchy cidata JSON"
+  fi
+
   local cidir
   cidir=$(mktemp -d)
 
   log "Generating Omarchy cidata ISO in ${cidir}..."
 
-  # Generate password hash if provided
-  local password_hash=""
-  if [[ -n "$CI_PASSWORD" ]]; then
-    password_hash=$(openssl passwd -6 "$CI_PASSWORD")
-  fi
+  local password_hash
+  password_hash=$(printf '%s' "$CI_PASSWORD" | openssl passwd -6 -stdin)
 
-  # Create user_configuration.json
-  cat >"${cidir}/user_configuration.json" <<'USERCONFIG'
-{
-  "hostname": "omarchy",
-  "timezone": "UTC",
-  "keyboard_layout": "us"
+  # Official archinstall credentials + full-disk layout (unencrypted).
+  CI_USER="$CI_USER" PASSWORD_HASH="$password_hash" \
+    OMARCHY_DISK_GB="$OMARCHY_DISK_GB" CIDIR="$cidir" \
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+user = os.environ["CI_USER"]
+password_hash = os.environ["PASSWORD_HASH"]
+disk_gb = int(os.environ["OMARCHY_DISK_GB"])
+cidir = Path(os.environ["CIDIR"])
+
+mib = 1024 * 1024
+gib = mib * 1024
+disk_size = disk_gb * gib
+disk_size_in_mib = (disk_size // mib) * mib
+gpt_backup_reserve = mib
+# Leave slack so LVM/ZFS rounding cannot push the last partition past end-of-disk.
+size_slack = 16 * mib
+boot_partition_start = mib
+boot_partition_size = 2 * gib
+main_partition_start = boot_partition_size + boot_partition_start
+main_partition_size = disk_size_in_mib - main_partition_start - gpt_backup_reserve - size_slack
+if main_partition_size <= 0:
+    raise SystemExit(f"Omarchy disk size {disk_gb}G is too small for the ESP + root layout")
+
+creds = {
+    "root_enc_password": password_hash,
+    "users": [
+        {
+            "enc_password": password_hash,
+            "groups": [],
+            "sudo": True,
+            "username": user,
+        }
+    ],
 }
-USERCONFIG
 
-  # Create user_credentials.json
-  cat >"${cidir}/user_credentials.json" <<CREDCONS
-{
-  "username": "${CI_USER}",
-  "password_hash": "${password_hash}"
+config = {
+    "app_config": None,
+    "archinstall-language": "English",
+    "auth_config": {},
+    "audio_config": {"audio": "pipewire"},
+    "bootloader_config": {"bootloader": "Limine", "uki": False, "removable": False},
+    "custom_commands": [],
+    "omarchy_install": {
+        "mode": "full_disk",
+        "defer_provisioning": False,
+        "target_mount": "/mnt",
+        "boot": {
+            "esp_mount": "/boot",
+            "esp_path": "/EFI/limine",
+            "efi_binary": "limine_x64.efi",
+            "enable_fallback": True,
+        },
+        "storage": {"kernel": "linux"},
+    },
+    "disk_config": {
+        "config_type": "default_layout",
+        "device_modifications": [
+            {
+                "device": "/dev/sda",
+                "partitions": [
+                    {
+                        "btrfs": [],
+                        "dev_path": None,
+                        "flags": ["boot", "esp"],
+                        "fs_type": "fat32",
+                        "mount_options": [],
+                        "mountpoint": "/boot",
+                        "obj_id": "ea21d3f2-82bb-49cc-ab5d-6f81ae94e18d",
+                        "size": {
+                            "sector_size": {"unit": "B", "value": 512},
+                            "unit": "B",
+                            "value": boot_partition_size,
+                        },
+                        "start": {
+                            "sector_size": {"unit": "B", "value": 512},
+                            "unit": "B",
+                            "value": boot_partition_start,
+                        },
+                        "status": "create",
+                        "type": "primary",
+                    },
+                    {
+                        "btrfs": [
+                            {"mountpoint": "/", "name": "@"},
+                            {"mountpoint": "/home", "name": "@home"},
+                            {"mountpoint": "/var/log", "name": "@log"},
+                            {"mountpoint": "/var/cache/pacman/pkg", "name": "@pkg"},
+                        ],
+                        "dev_path": None,
+                        "flags": [],
+                        "fs_type": "btrfs",
+                        "mount_options": ["compress=zstd"],
+                        "mountpoint": None,
+                        "obj_id": "8c2c2b92-1070-455d-b76a-56263bab24aa",
+                        "size": {
+                            "sector_size": {"unit": "B", "value": 512},
+                            "unit": "B",
+                            "value": main_partition_size,
+                        },
+                        "start": {
+                            "sector_size": {"unit": "B", "value": 512},
+                            "unit": "B",
+                            "value": main_partition_start,
+                        },
+                        "status": "create",
+                        "type": "primary",
+                    },
+                ],
+                "wipe": True,
+            }
+        ],
+    },
+    "hostname": "omarchy",
+    "kernels": ["linux"],
+    "network_config": {"type": "iso"},
+    "ntp": True,
+    "parallel_downloads": 8,
+    "script": None,
+    "services": [],
+    "swap": True,
+    "timezone": "UTC",
+    "locale_config": {
+        "kb_layout": "us",
+        "sys_enc": "UTF-8",
+        "sys_lang": "en_US.UTF-8",
+    },
+    "mirror_config": {
+        "custom_repositories": [],
+        "custom_servers": [
+            {"url": "https://mirror.omarchy.org/$repo/os/$arch"},
+            {"url": "https://mirror.rackspace.com/archlinux/$repo/os/$arch"},
+            {"url": "https://geo.mirror.pkgbuild.com/$repo/os/$arch"},
+        ],
+        "mirror_regions": {},
+        "optional_repositories": [],
+    },
+    "packages": [
+        "base-devel",
+        "git",
+        "omarchy-keyring",
+        "omarchy-settings",
+        "omarchy",
+    ],
+    "profile_config": {
+        "gfx_driver": None,
+        "greeter": None,
+        "profile": {},
+    },
+    "version": "3.0.9",
 }
-CREDCONS
 
-  # Create authorized_keys if SSH key provided
+(cidir / "user_credentials.json").write_text(json.dumps(creds, indent=2) + "\n")
+(cidir / "user_configuration.json").write_text(json.dumps(config, indent=2) + "\n")
+PY
+
+  printf 'false\n' >"${cidir}/user_encrypt_installation.txt"
+
+  # Only include authorized_keys when a key was given. An empty file on cidata
+  # fails the ISO install ("authorized_keys contains no SSH keys").
   if [[ -n "$SSH_PUBKEY" ]]; then
-    echo "$SSH_PUBKEY" >"${cidir}/authorized_keys"
+    printf '%s\n' "$SSH_PUBKEY" >"${cidir}/authorized_keys"
     log "Added SSH public key to cidata"
-  else
-    touch "${cidir}/authorized_keys"
   fi
 
-  # Check for xorriso
   if ! command -v xorriso &>/dev/null; then
     log "Installing xorriso for ISO creation..."
     apt-get update -qq
     apt-get install -y -qq xorriso
   fi
 
-  # Build ISO
-  local cidata_iso="${cidir}/cidata.iso"
+  mkdir -p /var/lib/vz/template/iso/
+  local final_path="/var/lib/vz/template/iso/omarchy-cidata.iso"
   xorriso -as genisoimage \
-    -output "$cidata_iso" \
+    -output "$final_path" \
     -volid CIDATA \
     -joliet \
     -rock \
-    "${cidir}/user_configuration.json" \
-    "${cidir}/user_credentials.json" \
-    "${cidir}/authorized_keys" \
+    "$cidir" \
     2>&1 | tail -5
 
-  if [[ ! -f "$cidata_iso" ]]; then
+  if [[ ! -f "$final_path" ]]; then
+    rm -rf "$cidir"
     error "Failed to create cidata ISO"
   fi
-
-  # Move to Proxmox ISO store
-  local final_path="/var/lib/vz/template/iso/omarchy-cidata.iso"
-  mv "$cidata_iso" "$final_path"
   chmod 644 "$final_path"
+  rm -rf "$cidir"
 
-  # Cleanup temp dir (but not the ISO)
-  rm -rf "${cidir}/user_configuration.json" "${cidir}/user_credentials.json" "${cidir}/authorized_keys"
-
+  OMARCHY_CIDATA_PATH="$final_path"
   log "cidata ISO created: $final_path"
-  echo "$final_path"
 }
 
 # ── Download Omarchy ISO ─────────────────────────────────────────────
@@ -603,7 +749,32 @@ configure_credentials() {
   log "Default user: ${CI_USER}"
 
   # ── Password ──
-  if [[ -z "$CI_PASSWORD" ]]; then
+  if [[ -n "$CI_PASSWORD" ]]; then
+    log "Password provided via --password flag"
+  elif [[ "$OS_TYPE" == "omarchy" ]]; then
+    if [[ ! -t 0 ]]; then
+      error "Omarchy unattended install requires a password (used as the user and root account hash)"
+    fi
+    echo ""
+    echo -e "  Omarchy unattended install requires a password for user ${CYAN}${CI_USER}${NC}."
+    while true; do
+      read -rsp "  Password: " pw1
+      echo ""
+      if [[ -z "$pw1" ]]; then
+        echo -e "  ${RED}Password is required for Omarchy.${NC}"
+        continue
+      fi
+      read -rsp "  Confirm password: " pw2
+      echo ""
+      if [[ "$pw1" == "$pw2" ]]; then
+        CI_PASSWORD="$pw1"
+        log "Password set for user '${CI_USER}'"
+        break
+      else
+        echo -e "  ${RED}Passwords do not match. Try again.${NC}"
+      fi
+    done
+  else
     echo ""
     echo -e "  Set a password for user ${CYAN}${CI_USER}${NC}."
     echo -e "  ${YELLOW}(Leave blank to skip — SSH key auth is recommended)${NC}"
@@ -624,8 +795,6 @@ configure_credentials() {
         echo -e "  ${RED}Passwords do not match. Try again.${NC}"
       fi
     done
-  else
-    log "Password provided via --password flag"
   fi
 
   # ── SSH public key ──
@@ -687,6 +856,11 @@ configure_credentials() {
     done
   fi
 
+  # Omarchy autoinstall needs a SHA-512 crypt hash in user_credentials.json.
+  if [[ "$OS_TYPE" == "omarchy" && -z "$CI_PASSWORD" ]]; then
+    error "Omarchy unattended install requires a password (used as the user and root account hash)"
+  fi
+
   # Warn if neither password nor key is set
   if [[ -z "$CI_PASSWORD" && -z "$SSH_PUBKEY" ]]; then
     echo ""
@@ -723,9 +897,7 @@ download_cloud_image() {
     ;;
   omarchy)
     download_omarchy_iso
-    local cidata_iso
-    cidata_iso=$(generate_omarchy_cidata)
-    OMARCHY_CIDATA_PATH="$cidata_iso"
+    generate_omarchy_cidata
     ;;
   esac
 }
@@ -832,6 +1004,10 @@ create_ubuntu_template() {
 
 # ── Omarchy template creation ────────────────────────────────────────
 create_omarchy_template() {
+  if [[ ! "$OMARCHY_DISK_GB" =~ ^[0-9]+$ ]] || ((OMARCHY_DISK_GB < 32)); then
+    error "OMARCHY_DISK_GB must be an integer >= 32 (got: ${OMARCHY_DISK_GB})"
+  fi
+
   log "Creating Omarchy VM for template (ID: ${TEMPLATE_VMID})..."
 
   # Create VM with UEFI, Omarchy ISO, and cidata ISO
@@ -850,8 +1026,8 @@ create_omarchy_template() {
   # EFI disk
   qm set "$TEMPLATE_VMID" --efidisk0 "${STORAGE_POOL}:0,efitype=4m,pre-enrolled-keys=0"
 
-  # Empty disk for install target
-  qm set "$TEMPLATE_VMID" --scsi0 "${STORAGE_POOL}:40,discard=on,iothread=1"
+  # Empty disk for install target (size must match cidata default_layout)
+  qm set "$TEMPLATE_VMID" --scsi0 "${STORAGE_POOL}:${OMARCHY_DISK_GB},discard=on,iothread=1"
 
   # Omarchy ISO
   qm set "$TEMPLATE_VMID" --ide2 "$(path_to_volume "${OMARCHY_ISO_PATH}"),media=cdrom"
@@ -983,9 +1159,6 @@ finalize_omarchy_template() {
 
   # Enable QEMU guest agent
   qm set "$vmid" --agent enabled=1
-
-  # Resize disk to 40G for Omarchy
-  qm resize "$vmid" scsi0 40G
 
   # Convert to template
   qm template "$vmid"
