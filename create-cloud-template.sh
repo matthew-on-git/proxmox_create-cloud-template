@@ -1115,30 +1115,26 @@ print(int(data.get("exitcode", 1)))'
 omarchy_inject_guest_agent() {
   local vmid="$1"
   local out rc
-  local user_q need_keys=0
+  local user_q
   user_q=$(python3 -c 'import json, os; print(json.dumps(os.environ.get("CI_USER") or ""))')
-  if [[ -n "${SSH_PUBKEY:-}" ]]; then
-    need_keys=1
-  fi
 
   out=$(
     qm guest exec "$vmid" --timeout 180 --pass-stdin -- /bin/bash 2>/dev/null <<GUEST
 set -u
-need_keys=${need_keys}
 # Username comes from the cidata credentials the installer loaded, not a hardcoded home path.
 user=\$(python3 -c 'import json; print(json.load(open("/root/user_credentials.json"))["users"][0]["username"])' 2>/dev/null || true)
 if [[ -z "\$user" ]]; then
   user=${user_q}
 fi
-# 2 = not ready. Wait until the owner account exists so we inject after
-# Omarchy has finished laying down /mnt (not a 60s stub root).
+# 2 = not ready. Owner account means Omarchy has finished useradd; keep
+# re-applying until reboot in case later phases overwrite /usr.
 if ! grep -q ' /mnt ' /proc/mounts; then
   exit 2
 fi
-if [[ -z "\$user" || ! -d /mnt/home/\$user ]]; then
+if [[ -z "\$user" ]]; then
   exit 2
 fi
-if [[ "\$need_keys" -eq 1 && ! -f /mnt/home/\$user/.ssh/authorized_keys ]]; then
+if [[ ! -d /mnt/home/\$user ]] && ! grep -q "^\$user:" /mnt/etc/passwd 2>/dev/null; then
   exit 2
 fi
 if [[ ! -f /mnt/etc/fstab || ! -x /mnt/usr/bin/systemctl ]]; then
@@ -1188,7 +1184,6 @@ GUEST
   rc=$(omarchy_guest_exec_code <<<"$out")
   case "$rc" in
   0)
-    log "qemu-guest-agent enabled in the installed system (user from cidata credentials)"
     return 0
     ;;
   2)
@@ -1418,8 +1413,12 @@ wait_for_omarchy_install() {
     if [[ "$hostname" == "archiso" ]]; then
       saw_live_iso=true
       missing_agent_polls=0
-      if [[ "$injected_ga" != true ]] && omarchy_inject_guest_agent "$vmid"; then
-        injected_ga=true
+      # Re-apply until reboot so later Omarchy phases cannot wipe the agent.
+      if omarchy_inject_guest_agent "$vmid"; then
+        if [[ "$injected_ga" != true ]]; then
+          log "qemu-guest-agent enabled in the installed system (user from cidata credentials)"
+          injected_ga=true
+        fi
       fi
     elif [[ -n "$hostname" ]]; then
       log "Guest hostname is '${hostname}' — install complete"
