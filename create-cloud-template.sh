@@ -1115,12 +1115,26 @@ print(int(data.get("exitcode", 1)))'
 omarchy_inject_guest_agent() {
   local vmid="$1"
   local out rc
+  local user_q need_keys=0
+  user_q=$(python3 -c 'import json, os; print(json.dumps(os.environ.get("CI_USER") or ""))')
+  if [[ -n "${SSH_PUBKEY:-}" ]]; then
+    need_keys=1
+  fi
 
   out=$(
-    qm guest exec "$vmid" --timeout 180 --pass-stdin -- /bin/bash 2>/dev/null <<'GUEST'
+    qm guest exec "$vmid" --timeout 180 --pass-stdin -- /bin/bash 2>/dev/null <<GUEST
 set -u
-# 2 = not ready. Do not write into an unmounted /mnt (that is a tmp dir on the live ISO).
+user=${user_q}
+need_keys=${need_keys}
+# 2 = not ready. Wait until the owner account exists so we inject after
+# Omarchy has finished laying down /mnt (not a 60s stub root).
 if ! grep -q ' /mnt ' /proc/mounts; then
+  exit 2
+fi
+if [[ -z "\$user" || ! -d /mnt/home/\$user ]]; then
+  exit 2
+fi
+if [[ "\$need_keys" -eq 1 && ! -f /mnt/home/\$user/.ssh/authorized_keys ]]; then
   exit 2
 fi
 if [[ ! -f /mnt/etc/fstab || ! -x /mnt/usr/bin/systemctl ]]; then
@@ -1133,14 +1147,14 @@ if pacman -r /mnt --noconfirm -Sy qemu-guest-agent &&
   systemctl --root=/mnt enable qemu-guest-agent; then
   :
 else
-  ga=$(command -v qemu-ga || true)
+  ga=\$(command -v qemu-ga || true)
   unit=/usr/lib/systemd/system/qemu-guest-agent.service
-  if [[ -z "$ga" || ! -f "$unit" ]]; then
+  if [[ -z "\$ga" || ! -f "\$unit" ]]; then
     echo "qemu-guest-agent is not in the ISO offline repo and not on the live system" >&2
     exit 1
   fi
-  install -D -m 0755 "$ga" /mnt/usr/bin/qemu-ga
-  install -D -m 0644 "$unit" /mnt/usr/lib/systemd/system/qemu-guest-agent.service
+  install -D -m 0755 "\$ga" /mnt/usr/bin/qemu-ga
+  install -D -m 0644 "\$unit" /mnt/usr/lib/systemd/system/qemu-guest-agent.service
   mkdir -p /mnt/etc/systemd/system/multi-user.target.wants
   ln -sfn /usr/lib/systemd/system/qemu-guest-agent.service \
     /mnt/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
