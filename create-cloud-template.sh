@@ -496,7 +496,7 @@ config = {
     "auth_config": {},
     "audio_config": {"audio": "pipewire"},
     "bootloader_config": {"bootloader": "Limine", "uki": False, "removable": False},
-    "custom_commands": [],
+    "custom_commands": ["systemctl enable qemu-guest-agent"],
     "omarchy_install": {
         "mode": "full_disk",
         "defer_provisioning": False,
@@ -597,6 +597,7 @@ config = {
         "omarchy-keyring",
         "omarchy-settings",
         "omarchy",
+        "qemu-guest-agent",
     ],
     "profile_config": {
         "gfx_driver": None,
@@ -1021,7 +1022,8 @@ create_omarchy_template() {
     --machine q35 \
     --ostype l26 \
     --serial0 socket \
-    --vga std
+    --vga std \
+    --agent enabled=1
 
   # EFI disk
   qm set "$TEMPLATE_VMID" --efidisk0 "${STORAGE_POOL}:0,efitype=4m,pre-enrolled-keys=0"
@@ -1035,8 +1037,9 @@ create_omarchy_template() {
   # cidata ISO
   qm set "$TEMPLATE_VMID" --ide3 "$(path_to_volume "${OMARCHY_CIDATA_PATH}"),media=cdrom"
 
-  # Boot order: CD-ROM first (for ISO install)
-  qm set "$TEMPLATE_VMID" --boot order='ide2;scsi0'
+  # Disk first: UEFI falls back to the ISO while scsi0 is empty, then boots
+  # the installed system after the installer reboots (official Omarchy order).
+  qm set "$TEMPLATE_VMID" --boot order='scsi0;ide2'
 
   log "VM ${TEMPLATE_VMID} created — starting unattended install..."
 
@@ -1044,22 +1047,32 @@ create_omarchy_template() {
   wait_for_omarchy_install "$TEMPLATE_VMID"
 }
 
+# ── Guest hostname via qemu-guest-agent (empty if the agent is down) ─
+omarchy_guest_hostname() {
+  local vmid="$1"
+  local raw
+  raw=$(qm guest cmd "$vmid" get-host-name 2>/dev/null) || return 1
+  python3 -c 'import json,sys; print(json.load(sys.stdin).get("host-name") or "")' <<<"$raw" 2>/dev/null
+}
+
 # ── Wait for Omarchy install to complete ─────────────────────────────
+# The live ISO hostname is "archiso". After a successful install the guest
+# reboots into the installed OS (hostname "omarchy" unless cidata overrides it).
+# QEMU guest reboot does not show as qm "stopped", so do not rely on power-off.
 # shellcheck disable=SC2317
 wait_for_omarchy_install() {
   local vmid="$1"
   local timeout=1800 # 30 minutes max
   local interval=15
   local elapsed=0
-  local was_running=false
-  local rebooted=false
+  local hostname=""
 
   # Start the VM
   qm start "$vmid"
   log "VM ${vmid} started — waiting for install to complete..."
+  log "Install is done when the guest hostname is no longer 'archiso'"
 
   while [[ $elapsed -lt $timeout ]]; do
-    # Check if VM is running
     local status
     status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
 
@@ -1068,41 +1081,37 @@ wait_for_omarchy_install() {
       return 1
     fi
 
-    # Check if VM is powered on (still installing or rebooting)
-    if [[ "$status" == "status: running" ]]; then
-      if [[ "$was_running" == false ]]; then
-        # Just came back up — likely rebooted after install
-        if [[ "$rebooted" == true ]]; then
-          log "VM ${vmid} rebooted — install likely complete"
-          break
-        fi
-        was_running=true
-        log "VM ${vmid} is running — installing..."
-      fi
-      if ((elapsed % 60 == 0)); then
-        log "Still installing... (${elapsed}s elapsed)"
-      fi
-      sleep "$interval"
-      elapsed=$((elapsed + interval))
-      continue
-    fi
-
-    # VM is stopped
-    if [[ "$was_running" == true ]]; then
-      # VM was running and now stopped — installer finished, about to reboot
-      was_running=false
+    if [[ "$status" == "status: stopped" ]]; then
       log "VM ${vmid} stopped — waiting for reboot..."
       sleep "$interval"
       elapsed=$((elapsed + interval))
       continue
     fi
 
-    error "Unexpected VM status: $status"
-    return 1
+    if [[ "$status" != "status: running" ]]; then
+      error "Unexpected VM status: $status"
+      return 1
+    fi
+
+    hostname=$(omarchy_guest_hostname "$vmid" || true)
+    if [[ -n "$hostname" && "$hostname" != "archiso" ]]; then
+      log "Guest hostname is '${hostname}' — install complete"
+      break
+    fi
+
+    if ((elapsed % 60 == 0)); then
+      if [[ -n "$hostname" ]]; then
+        log "Still installing... (${elapsed}s elapsed, guest hostname: ${hostname})"
+      else
+        log "Still installing... (${elapsed}s elapsed)"
+      fi
+    fi
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
   done
 
   if [[ $elapsed -ge $timeout ]]; then
-    error "Install timed out after ${timeout}s"
+    error "Install timed out after ${timeout}s (guest never left the live ISO)"
     qm shutdown "$vmid" 2>/dev/null
     return 1
   fi
