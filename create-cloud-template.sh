@@ -1113,7 +1113,11 @@ omarchy_inject_guest_agent() {
   local vmid="$1"
   local out
 
-  out=$(qm guest exec "$vmid" --timeout 20 -- test -x /mnt/usr/bin/systemctl 2>/dev/null) || return 1
+  # Wait until the *install target* is mounted, not the live ISO root.
+  # /mnt/etc/fstab is written near the end of arch_install_system.
+  out=$(qm guest exec "$vmid" --timeout 20 -- /bin/bash -c \
+    'findmnt -n /mnt >/dev/null && test -f /mnt/etc/fstab && test -x /mnt/usr/bin/systemctl' \
+    2>/dev/null) || return 1
   if ! omarchy_guest_exec_exitcode <<<"$out"; then
     return 1
   fi
