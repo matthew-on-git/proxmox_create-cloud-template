@@ -1096,42 +1096,42 @@ omarchy_guest_agent_up() {
   qm guest cmd "$vmid" ping &>/dev/null
 }
 
-omarchy_guest_exec_exitcode() {
+omarchy_guest_exec_code() {
   python3 -c 'import json, sys
 try:
     data = json.load(sys.stdin)
 except Exception:
-    sys.exit(1)
+    print(1)
+    raise SystemExit(0)
 if not data.get("exited"):
-    sys.exit(1)
-sys.exit(int(data.get("exitcode", 1)))'
+    print(1)
+    raise SystemExit(0)
+print(int(data.get("exitcode", 1)))'
 }
 
 # While the live ISO still has qemu-ga, install/enable qemu-guest-agent in /mnt
 # (Omarchy's orchestrator ignores cidata packages/custom_commands).
+# Guest exit codes: 0 = enabled, 2 = /mnt not ready yet, 1 = failed.
 omarchy_inject_guest_agent() {
   local vmid="$1"
-  local out
+  local out rc
 
-  # Wait until the *install target* is mounted, not the live ISO root.
-  # /mnt/etc/fstab is written near the end of arch_install_system.
-  out=$(qm guest exec "$vmid" --timeout 20 -- /bin/bash -c \
-    'findmnt -n /mnt >/dev/null && test -f /mnt/etc/fstab && test -x /mnt/usr/bin/systemctl' \
-    2>/dev/null) || return 1
-  if ! omarchy_guest_exec_exitcode <<<"$out"; then
-    return 1
-  fi
-
-  log "Install target is mounted — injecting qemu-guest-agent into /mnt"
   out=$(
     qm guest exec "$vmid" --timeout 180 --pass-stdin -- /bin/bash 2>/dev/null <<'GUEST'
-set -euo pipefail
-if [[ -L /mnt/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service ]] ||
-  systemctl --root=/mnt is-enabled qemu-guest-agent >/dev/null 2>&1; then
+set -u
+# 2 = not ready. Do not write into an unmounted /mnt (that is a tmp dir on the live ISO).
+if ! grep -q ' /mnt ' /proc/mounts; then
+  exit 2
+fi
+if [[ ! -f /mnt/etc/fstab || ! -x /mnt/usr/bin/systemctl ]]; then
+  exit 2
+fi
+if [[ -L /mnt/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service ]]; then
   exit 0
 fi
-if pacman -r /mnt --noconfirm -Sy qemu-guest-agent; then
-  systemctl --root=/mnt enable qemu-guest-agent
+if pacman -r /mnt --noconfirm -Sy qemu-guest-agent &&
+  systemctl --root=/mnt enable qemu-guest-agent; then
+  :
 else
   ga=$(command -v qemu-ga || true)
   unit=/usr/lib/systemd/system/qemu-guest-agent.service
@@ -1144,6 +1144,10 @@ else
   mkdir -p /mnt/etc/systemd/system/multi-user.target.wants
   ln -sfn /usr/lib/systemd/system/qemu-guest-agent.service \
     /mnt/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
+fi
+if [[ ! -L /mnt/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service ]]; then
+  echo "enable did not create qemu-guest-agent symlink" >&2
+  exit 1
 fi
 mkdir -p /mnt/etc/NetworkManager/system-connections
 cat >/mnt/etc/NetworkManager/system-connections/ethernet.nmconnection <<'NM'
@@ -1163,11 +1167,20 @@ chmod 600 /mnt/etc/NetworkManager/system-connections/ethernet.nmconnection
 exit 0
 GUEST
   ) || return 1
-  if omarchy_guest_exec_exitcode <<<"$out"; then
+  rc=$(omarchy_guest_exec_code <<<"$out")
+  case "$rc" in
+  0)
     log "qemu-guest-agent enabled in the installed system"
     return 0
-  fi
-  return 1
+    ;;
+  2)
+    return 1
+    ;;
+  *)
+    warn "qemu-guest-agent inject failed (guest exit ${rc})"
+    return 1
+    ;;
+  esac
 }
 
 omarchy_guest_mac() {
