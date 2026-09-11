@@ -1163,6 +1163,23 @@ if [[ ! -L /mnt/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.serv
   echo "enable did not create qemu-guest-agent symlink" >&2
   exit 1
 fi
+# Vendor unit often waits on a udev alias that Omarchy does not create at boot.
+install -D -m 0755 "\$(command -v qemu-ga || echo /usr/bin/qemu-ga)" /mnt/usr/bin/qemu-ga
+cat >/mnt/etc/systemd/system/qemu-ga-virtio.service <<'UNIT'
+[Unit]
+Description=QEMU Guest Agent (virtio-serial)
+After=local-fs.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=2
+ExecStart=/bin/sh -c 'while true; do for d in /dev/virtio-ports/org.qemu.guest_agent.0 /dev/vport1p1 /dev/vport0p1; do if [ -c "\$d" ]; then exec /usr/bin/qemu-ga --method=virtio-serial --path="\$d"; fi; done; sleep 2; done'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl --root=/mnt enable qemu-ga-virtio.service
 mkdir -p /mnt/etc/NetworkManager/system-connections
 cat >/mnt/etc/NetworkManager/system-connections/ethernet.nmconnection <<'NM'
 [connection]
@@ -1284,6 +1301,20 @@ provision_omarchy_guest_agent() {
     log "QEMU guest agent is already running in VM ${vmid}"
     return 0
   fi
+
+  log "Waiting for qemu-guest-agent after reboot..."
+  for i in $(seq 1 36); do
+    if omarchy_guest_agent_up "$vmid"; then
+      log "QEMU guest agent is running in VM ${vmid}"
+      return 0
+    fi
+    hostname=$(omarchy_guest_hostname "$vmid" || true)
+    if [[ -n "$hostname" && "$hostname" != "archiso" ]]; then
+      log "Guest hostname is '${hostname}' — guest agent is up"
+      return 0
+    fi
+    sleep 5
+  done
 
   status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
   if [[ "$status" != "status: running" ]]; then
@@ -1426,7 +1457,12 @@ wait_for_omarchy_install() {
     else
       if [[ "$saw_live_iso" == true && $elapsed -ge $min_install_seconds ]]; then
         missing_agent_polls=$((missing_agent_polls + 1))
-        if ((missing_agent_polls >= missing_agent_needed)); then
+        # Injected agent may need several minutes after Omarchy's first boot.
+        needed=$missing_agent_needed
+        if [[ "$injected_ga" == true ]]; then
+          needed=16
+        fi
+        if ((missing_agent_polls >= needed)); then
           log "Live ISO agent gone after ${elapsed}s — guest rebooted into installed OS"
           break
         fi
