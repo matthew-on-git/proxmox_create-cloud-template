@@ -1096,6 +1096,76 @@ omarchy_guest_agent_up() {
   qm guest cmd "$vmid" ping &>/dev/null
 }
 
+omarchy_guest_exec_exitcode() {
+  python3 -c 'import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not data.get("exited"):
+    sys.exit(1)
+sys.exit(int(data.get("exitcode", 1)))'
+}
+
+# While the live ISO still has qemu-ga, install/enable qemu-guest-agent in /mnt
+# (Omarchy's orchestrator ignores cidata packages/custom_commands).
+omarchy_inject_guest_agent() {
+  local vmid="$1"
+  local out
+
+  out=$(qm guest exec "$vmid" --timeout 20 -- test -x /mnt/usr/bin/systemctl 2>/dev/null) || return 1
+  if ! omarchy_guest_exec_exitcode <<<"$out"; then
+    return 1
+  fi
+
+  log "Install target is mounted — injecting qemu-guest-agent into /mnt"
+  out=$(
+    qm guest exec "$vmid" --timeout 180 --pass-stdin -- /bin/bash 2>/dev/null <<'GUEST'
+set -euo pipefail
+if [[ -L /mnt/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service ]] ||
+  systemctl --root=/mnt is-enabled qemu-guest-agent >/dev/null 2>&1; then
+  exit 0
+fi
+if pacman -r /mnt --noconfirm -Sy qemu-guest-agent; then
+  systemctl --root=/mnt enable qemu-guest-agent
+else
+  ga=$(command -v qemu-ga || true)
+  unit=/usr/lib/systemd/system/qemu-guest-agent.service
+  if [[ -z "$ga" || ! -f "$unit" ]]; then
+    echo "qemu-guest-agent is not in the ISO offline repo and not on the live system" >&2
+    exit 1
+  fi
+  install -D -m 0755 "$ga" /mnt/usr/bin/qemu-ga
+  install -D -m 0644 "$unit" /mnt/usr/lib/systemd/system/qemu-guest-agent.service
+  mkdir -p /mnt/etc/systemd/system/multi-user.target.wants
+  ln -sfn /usr/lib/systemd/system/qemu-guest-agent.service \
+    /mnt/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
+fi
+mkdir -p /mnt/etc/NetworkManager/system-connections
+cat >/mnt/etc/NetworkManager/system-connections/ethernet.nmconnection <<'NM'
+[connection]
+id=ethernet
+type=ethernet
+autoconnect=true
+autoconnect-priority=100
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+NM
+chmod 600 /mnt/etc/NetworkManager/system-connections/ethernet.nmconnection
+exit 0
+GUEST
+  ) || return 1
+  if omarchy_guest_exec_exitcode <<<"$out"; then
+    log "qemu-guest-agent enabled in the installed system"
+    return 0
+  fi
+  return 1
+}
+
 omarchy_guest_mac() {
   local vmid="$1"
   qm config "$vmid" 2>/dev/null | sed -n 's/^net0:.*virtio=\([0-9A-Fa-f:]*\).*/\1/p' | tr 'A-F' 'a-f'
@@ -1278,6 +1348,7 @@ wait_for_omarchy_install() {
   local elapsed=0
   local hostname=""
   local saw_live_iso=false
+  local injected_ga=false
   local missing_agent_polls=0
   local min_install_seconds=180
   local missing_agent_needed=4
@@ -1312,6 +1383,9 @@ wait_for_omarchy_install() {
     if [[ "$hostname" == "archiso" ]]; then
       saw_live_iso=true
       missing_agent_polls=0
+      if [[ "$injected_ga" != true ]] && omarchy_inject_guest_agent "$vmid"; then
+        injected_ga=true
+      fi
     elif [[ -n "$hostname" ]]; then
       log "Guest hostname is '${hostname}' — install complete"
       break
