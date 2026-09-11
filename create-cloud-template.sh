@@ -15,6 +15,7 @@ STORAGE_POOL=""
 CUSTOM_IMAGE=""
 VMID_FROM_FLAG=false
 TEMPLATE_ALREADY_EXISTS=false
+OMARCHY_SKIP_INSTALL=false
 SKIP_CONFIRM=false
 OMARCHY_VERSION=""
 OMARCHY_LABEL=""
@@ -92,6 +93,7 @@ SKIP_CONFIRM=false
 CUSTOM_IMAGE=""
 VMID_FROM_FLAG=false
 TEMPLATE_ALREADY_EXISTS=false
+OMARCHY_SKIP_INSTALL=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -179,7 +181,13 @@ pick_vmid() {
       TEMPLATE_ALREADY_EXISTS=true
       ;;
     1)
-      error "VM ID ${TEMPLATE_VMID} exists but is NOT a template. Remove it first or pick a different ID."
+      if [[ "$OS_TYPE" == "omarchy" ]] && omarchy_installer_vm "$TEMPLATE_VMID"; then
+        warn "VM ${TEMPLATE_VMID} is an Omarchy installer that was never converted to a template"
+        log "Will install qemu-guest-agent and finalize (no reinstall)"
+        OMARCHY_SKIP_INSTALL=true
+      else
+        error "VM ID ${TEMPLATE_VMID} exists but is NOT a template. Remove it first or pick a different ID."
+      fi
       ;;
     esac
     log "Using VMID: $TEMPLATE_VMID"
@@ -248,9 +256,12 @@ pick_vmid() {
       echo ""
       echo "  1) Pick a different VMID"
       echo "  2) Destroy it and use this VMID"
+      if omarchy_installer_vm "$input_vmid"; then
+        echo "  3) Finalize this Omarchy installer (skip reinstall)"
+      fi
       echo ""
       local action
-      read -rp "  Select [1-2] (default: 1): " action
+      read -rp "  Select [1-3] (default: 1): " action
       action="${action:-1}"
       case $action in
       1) continue ;;
@@ -260,6 +271,17 @@ pick_vmid() {
         qm destroy "$input_vmid" --purge
         log "VM ${input_vmid} destroyed"
         TEMPLATE_VMID="$input_vmid"
+        return
+        ;;
+      3)
+        if ! omarchy_installer_vm "$input_vmid"; then
+          echo -e "  ${RED}That VM is not an Omarchy installer.${NC}"
+          continue
+        fi
+        TEMPLATE_VMID="$input_vmid"
+        OMARCHY_SKIP_INSTALL=true
+        OS_TYPE="omarchy"
+        log "Will finalize existing Omarchy installer ${TEMPLATE_VMID}"
         return
         ;;
       *)
@@ -496,7 +518,9 @@ config = {
     "auth_config": {},
     "audio_config": {"audio": "pipewire"},
     "bootloader_config": {"bootloader": "Limine", "uki": False, "removable": False},
-    "custom_commands": ["systemctl enable qemu-guest-agent"],
+    "custom_commands": [
+        "pacman -Sy --noconfirm qemu-guest-agent && systemctl enable qemu-guest-agent"
+    ],
     "omarchy_install": {
         "mode": "full_disk",
         "defer_provisioning": False,
@@ -1047,12 +1071,175 @@ create_omarchy_template() {
   wait_for_omarchy_install "$TEMPLATE_VMID"
 }
 
+# ── True when this VMID is a leftover Omarchy installer (not a template) ─
+omarchy_installer_vm() {
+  local vmid="$1"
+  local cfg name
+  cfg=$(qm config "$vmid" 2>/dev/null) || return 1
+  echo "$cfg" | grep -q "^template: 1" && return 1
+  name=$(echo "$cfg" | awk '/^name:/{print $2}')
+  [[ "$name" == omarchy-installer-* ]] || return 1
+  echo "$cfg" | grep -q "^scsi0:" || return 1
+  return 0
+}
+
 # ── Guest hostname via qemu-guest-agent (empty if the agent is down) ─
 omarchy_guest_hostname() {
   local vmid="$1"
   local raw
   raw=$(qm guest cmd "$vmid" get-host-name 2>/dev/null) || return 1
   python3 -c 'import json,sys; print(json.load(sys.stdin).get("host-name") or "")' <<<"$raw" 2>/dev/null
+}
+
+omarchy_guest_agent_up() {
+  local vmid="$1"
+  qm guest cmd "$vmid" ping &>/dev/null
+}
+
+omarchy_guest_mac() {
+  local vmid="$1"
+  qm config "$vmid" 2>/dev/null | sed -n 's/^net0:.*virtio=\([0-9A-Fa-f:]*\).*/\1/p' | tr 'A-F' 'a-f'
+}
+
+omarchy_guest_ipv4() {
+  local vmid="$1"
+  local mac
+  mac=$(omarchy_guest_mac "$vmid")
+  [[ -n "$mac" ]] || return 1
+  ip -4 neigh show | awk -v mac="$mac" 'BEGIN {IGNORECASE=1} $5 == mac && $1 ~ /^[0-9.]+$/ {print $1; exit}'
+}
+
+omarchy_ensure_sshpass() {
+  if command -v sshpass &>/dev/null; then
+    return 0
+  fi
+  log "Installing sshpass to provision qemu-guest-agent..."
+  apt-get update -qq
+  apt-get install -y -qq sshpass
+}
+
+omarchy_ssh() {
+  local ip="$1"
+  shift
+  local -a ident=()
+  local key
+  if [[ -n "${SSH_PUBKEY_FILE:-}" ]]; then
+    key="${SSH_PUBKEY_FILE%.pub}"
+    if [[ -f "$key" && "$key" != "$SSH_PUBKEY_FILE" ]]; then
+      ident+=(-i "$key")
+    fi
+  fi
+  for key in "${HOME}/.ssh/id_ed25519" "${HOME}/.ssh/id_rsa"; do
+    if [[ -f "$key" ]]; then
+      ident+=(-i "$key")
+    fi
+  done
+  if [[ -n "${CI_PASSWORD:-}" ]] && command -v sshpass &>/dev/null; then
+    SSHPASS="$CI_PASSWORD" sshpass -e ssh \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=8 \
+      -o PreferredAuthentications=password,publickey \
+      "${ident[@]}" \
+      "${CI_USER}@${ip}" "$@"
+  else
+    ssh \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=8 \
+      "${ident[@]}" \
+      "${CI_USER}@${ip}" "$@"
+  fi
+}
+
+# Install and start qemu-guest-agent in the installed guest via SSH.
+provision_omarchy_guest_agent() {
+  local vmid="$1"
+  local status ip i
+
+  if omarchy_guest_agent_up "$vmid"; then
+    log "QEMU guest agent is already running in VM ${vmid}"
+    return 0
+  fi
+
+  status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
+  if [[ "$status" != "status: running" ]]; then
+    log "Starting VM ${vmid} to install qemu-guest-agent..."
+    qm start "$vmid"
+    sleep 20
+  fi
+
+  if [[ -z "${CI_PASSWORD:-}" && -z "${SSH_PUBKEY:-}" ]]; then
+    warn "No password or SSH key — cannot install qemu-guest-agent in the guest"
+    return 0
+  fi
+
+  if [[ -n "${CI_PASSWORD:-}" ]]; then
+    omarchy_ensure_sshpass
+  fi
+
+  log "Waiting for guest DHCP/ARP on VM ${vmid}..."
+  ip=""
+  for i in $(seq 1 24); do
+    ip=$(omarchy_guest_ipv4 "$vmid" || true)
+    if [[ -n "$ip" ]]; then
+      break
+    fi
+    sleep 5
+  done
+  if [[ -z "$ip" ]]; then
+    warn "Could not find guest IP for VM ${vmid} — guest agent will not be installed"
+    return 0
+  fi
+  log "Guest IP is ${ip} — installing qemu-guest-agent"
+
+  if ! {
+    printf '%s\n' "$CI_PASSWORD"
+    cat <<'REMOTE'
+set -euo pipefail
+pacman -Sy --noconfirm qemu-guest-agent
+systemctl enable --now qemu-guest-agent
+REMOTE
+  } | omarchy_ssh "$ip" "sudo -S -p '' bash -s"; then
+    warn "Failed to install qemu-guest-agent over SSH (sudo/SSH rejected)"
+    return 0
+  fi
+
+  for i in $(seq 1 20); do
+    if omarchy_guest_agent_up "$vmid"; then
+      log "QEMU guest agent is running in VM ${vmid}"
+      return 0
+    fi
+    sleep 3
+  done
+  warn "qemu-guest-agent installed but Proxmox still cannot ping it"
+}
+
+# ACPI/agent shutdown, then always hard-stop. Never abort finalize if qga is down.
+stop_guest_vm() {
+  local vmid="$1"
+  local status i
+  status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
+  if [[ "$status" != "status: running" ]]; then
+    return 0
+  fi
+
+  log "Shutting down VM ${vmid} before finalizing..."
+  qm shutdown "$vmid" --skiplock --timeout 30 --forceStop 1 2>/dev/null ||
+    qm shutdown "$vmid" --skiplock --timeout 30 2>/dev/null ||
+    true
+
+  for i in $(seq 1 40); do
+    status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
+    if [[ "$status" == "status: stopped" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  warn "VM ${vmid} did not stop gracefully, forcing off"
+  qm stop "$vmid" --skiplock 2>/dev/null || true
+  sleep 3
 }
 
 # ── Wait for Omarchy install to complete ─────────────────────────────
@@ -1069,8 +1256,8 @@ wait_for_omarchy_install() {
   local hostname=""
   local saw_live_iso=false
   local missing_agent_polls=0
-  local min_install_seconds=600
-  local missing_agent_needed=8
+  local min_install_seconds=180
+  local missing_agent_needed=4
 
   # Start the VM
   qm start "$vmid"
@@ -1143,25 +1330,7 @@ wait_for_omarchy_install() {
 finalize_omarchy_template() {
   local vmid="$1"
 
-  # Ensure VM is stopped before modifying
-  local status
-  status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
-  if [[ "$status" == "status: running" ]]; then
-    log "Shutting down VM ${vmid} before finalizing..."
-    qm shutdown "$vmid" --skiplock
-    for i in $(seq 1 60); do
-      status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
-      if [[ "$status" == "status: stopped" ]]; then
-        break
-      fi
-      sleep 1
-    done
-    if [[ "$status" != "status: stopped" ]]; then
-      warn "VM ${vmid} did not stop gracefully, forcing shutdown"
-      qm stop "$vmid" --skiplock 2>/dev/null || true
-      sleep 5
-    fi
-  fi
+  stop_guest_vm "$vmid"
 
   # Remove Omarchy ISO, add cloud-init CDROM
   qm set "$vmid" --ide2 "none,media=cdrom"
@@ -1276,13 +1445,18 @@ main() {
     fi
   fi
 
-  if [[ "$TEMPLATE_ALREADY_EXISTS" != true ]]; then
+  if [[ "$TEMPLATE_ALREADY_EXISTS" != true && "$OMARCHY_SKIP_INSTALL" != true ]]; then
     download_cloud_image
   fi
-  create_vm_template
+  if [[ "$OMARCHY_SKIP_INSTALL" != true ]]; then
+    create_vm_template
+  else
+    log "Skipping ISO install — finishing existing VM ${TEMPLATE_VMID}"
+  fi
 
-  # Finalize Omarchy template (remove ISOs, add cloud-init, convert)
+  # Finalize Omarchy template (guest agent, remove ISOs, add cloud-init, convert)
   if [[ "$OS_TYPE" == "omarchy" ]]; then
+    provision_omarchy_guest_agent "$TEMPLATE_VMID"
     finalize_omarchy_template "$TEMPLATE_VMID"
   fi
 
