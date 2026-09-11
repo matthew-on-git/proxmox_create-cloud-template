@@ -875,6 +875,8 @@ wait_for_omarchy_install() {
   local timeout=1800 # 30 minutes max
   local interval=15
   local elapsed=0
+  local was_running=false
+  local rebooted=false
 
   # Start the VM
   qm start "$vmid"
@@ -890,17 +892,30 @@ wait_for_omarchy_install() {
       return 1
     fi
 
-    # Check if VM is powered off (install complete)
-    if [[ "$status" == "status: stopped" ]]; then
-      log "VM ${vmid} stopped — install likely complete"
-      break
-    fi
-
-    # Check if VM is powered on (still installing)
+    # Check if VM is powered on (still installing or rebooting)
     if [[ "$status" == "status: running" ]]; then
+      if [[ "$was_running" == false ]]; then
+        # Just came back up — likely rebooted after install
+        if [[ "$rebooted" == true ]]; then
+          log "VM ${vmid} rebooted — install likely complete"
+          break
+        fi
+        was_running=true
+        log "VM ${vmid} is running — installing..."
+      fi
       if ((elapsed % 60 == 0)); then
         log "Still installing... (${elapsed}s elapsed)"
       fi
+      sleep "$interval"
+      elapsed=$((elapsed + interval))
+      continue
+    fi
+
+    # VM is stopped
+    if [[ "$was_running" == true ]]; then
+      # VM was running and now stopped — installer finished, about to reboot
+      was_running=false
+      log "VM ${vmid} stopped — waiting for reboot..."
       sleep "$interval"
       elapsed=$((elapsed + interval))
       continue
@@ -922,6 +937,26 @@ wait_for_omarchy_install() {
 # ── Finalize Omarchy template ────────────────────────────────────────
 finalize_omarchy_template() {
   local vmid="$1"
+
+  # Ensure VM is stopped before modifying
+  local status
+  status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
+  if [[ "$status" == "status: running" ]]; then
+    log "Shutting down VM ${vmid} before finalizing..."
+    qm shutdown "$vmid" --skiplock
+    for i in $(seq 1 60); do
+      status=$(qm status "$vmid" 2>/dev/null | grep -o 'status: \w*')
+      if [[ "$status" == "status: stopped" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$status" != "status: stopped" ]]; then
+      warn "VM ${vmid} did not stop gracefully, forcing shutdown"
+      qm stop "$vmid" --skiplock 2>/dev/null || true
+      sleep 5
+    fi
+  fi
 
   # Remove Omarchy ISO, add cloud-init CDROM
   qm set "$vmid" --ide2 "none,media=cdrom"
