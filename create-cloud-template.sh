@@ -1124,8 +1124,12 @@ omarchy_inject_guest_agent() {
   out=$(
     qm guest exec "$vmid" --timeout 180 --pass-stdin -- /bin/bash 2>/dev/null <<GUEST
 set -u
-user=${user_q}
 need_keys=${need_keys}
+# Username comes from the cidata credentials the installer loaded, not a hardcoded home path.
+user=\$(python3 -c 'import json; print(json.load(open("/root/user_credentials.json"))["users"][0]["username"])' 2>/dev/null || true)
+if [[ -z "\$user" ]]; then
+  user=${user_q}
+fi
 # 2 = not ready. Wait until the owner account exists so we inject after
 # Omarchy has finished laying down /mnt (not a 60s stub root).
 if ! grep -q ' /mnt ' /proc/mounts; then
@@ -1184,7 +1188,7 @@ GUEST
   rc=$(omarchy_guest_exec_code <<<"$out")
   case "$rc" in
   0)
-    log "qemu-guest-agent enabled in the installed system"
+    log "qemu-guest-agent enabled in the installed system (user from cidata credentials)"
     return 0
     ;;
   2)
