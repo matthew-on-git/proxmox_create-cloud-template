@@ -845,7 +845,7 @@ create_omarchy_template() {
     --machine q35 \
     --ostype l26 \
     --serial0 socket \
-    --vga serial0
+    --vga std
 
   # EFI disk
   qm set "$TEMPLATE_VMID" --efidisk0 "${STORAGE_POOL}:0,efitype=4m,pre-enrolled-keys=0"
