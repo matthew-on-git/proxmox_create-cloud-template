@@ -1056,9 +1056,10 @@ omarchy_guest_hostname() {
 }
 
 # ── Wait for Omarchy install to complete ─────────────────────────────
-# The live ISO hostname is "archiso". After a successful install the guest
-# reboots into the installed OS (hostname "omarchy" unless cidata overrides it).
-# QEMU guest reboot does not show as qm "stopped", so do not rely on power-off.
+# The live ISO hostname is "archiso" and its qemu-guest-agent is up. After
+# install the guest reboots into the installed OS. QEMU reset does not show
+# as qm "stopped". The installed image may not run qemu-guest-agent, so
+# "archiso then agent gone" after the ISO has been up is also success.
 # shellcheck disable=SC2317
 wait_for_omarchy_install() {
   local vmid="$1"
@@ -1066,11 +1067,15 @@ wait_for_omarchy_install() {
   local interval=15
   local elapsed=0
   local hostname=""
+  local saw_live_iso=false
+  local missing_agent_polls=0
+  local min_install_seconds=600
+  local missing_agent_needed=8
 
   # Start the VM
   qm start "$vmid"
   log "VM ${vmid} started — waiting for install to complete..."
-  log "Install is done when the guest hostname is no longer 'archiso'"
+  log "Install is done when the guest leaves the live ISO (hostname != archiso)"
 
   while [[ $elapsed -lt $timeout ]]; do
     local status
@@ -1094,9 +1099,20 @@ wait_for_omarchy_install() {
     fi
 
     hostname=$(omarchy_guest_hostname "$vmid" || true)
-    if [[ -n "$hostname" && "$hostname" != "archiso" ]]; then
+    if [[ "$hostname" == "archiso" ]]; then
+      saw_live_iso=true
+      missing_agent_polls=0
+    elif [[ -n "$hostname" ]]; then
       log "Guest hostname is '${hostname}' — install complete"
       break
+    else
+      if [[ "$saw_live_iso" == true && $elapsed -ge $min_install_seconds ]]; then
+        missing_agent_polls=$((missing_agent_polls + 1))
+        if ((missing_agent_polls >= missing_agent_needed)); then
+          log "Live ISO agent gone after ${elapsed}s — guest rebooted into installed OS"
+          break
+        fi
+      fi
     fi
 
     if ((elapsed % 60 == 0)); then
@@ -1111,9 +1127,13 @@ wait_for_omarchy_install() {
   done
 
   if [[ $elapsed -ge $timeout ]]; then
-    error "Install timed out after ${timeout}s (guest never left the live ISO)"
-    qm shutdown "$vmid" 2>/dev/null
-    return 1
+    if [[ "$saw_live_iso" == true ]]; then
+      warn "Timed out after ${timeout}s but the live ISO did start — assuming install finished"
+    else
+      error "Install timed out after ${timeout}s (guest never left the live ISO)"
+      qm shutdown "$vmid" 2>/dev/null
+      return 1
+    fi
   fi
 
   log "Install complete (${elapsed}s elapsed)"
