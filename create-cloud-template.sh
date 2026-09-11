@@ -1101,12 +1101,35 @@ omarchy_guest_mac() {
   qm config "$vmid" 2>/dev/null | sed -n 's/^net0:.*virtio=\([0-9A-Fa-f:]*\).*/\1/p' | tr 'A-F' 'a-f'
 }
 
+omarchy_guest_bridge() {
+  local vmid="$1"
+  qm config "$vmid" 2>/dev/null | sed -n 's/^net0:.*bridge=\([^,]*\).*/\1/p'
+}
+
+# Host ARP is often empty until we talk to the guest. Ping the bridge broadcast
+# and arping the MAC so ip-neigh can see the DHCP address.
+omarchy_solicit_arp() {
+  local vmid="$1"
+  local mac bridge bcast
+  mac=$(omarchy_guest_mac "$vmid")
+  bridge=$(omarchy_guest_bridge "$vmid")
+  [[ -n "$mac" && -n "$bridge" ]] || return 0
+  bcast=$(ip -4 addr show dev "$bridge" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "brd") {print $(i + 1); exit}}')
+  if [[ -n "$bcast" ]]; then
+    ping -c 1 -W 1 -b -I "$bridge" "$bcast" &>/dev/null || true
+  fi
+  if command -v arping &>/dev/null; then
+    arping -c 1 -w 1 -I "$bridge" -t "$mac" 0.0.0.0 &>/dev/null || true
+  fi
+}
+
 omarchy_guest_ipv4() {
   local vmid="$1"
   local mac
   mac=$(omarchy_guest_mac "$vmid")
   [[ -n "$mac" ]] || return 1
-  ip -4 neigh show | awk -v mac="$mac" 'BEGIN {IGNORECASE=1} $5 == mac && $1 ~ /^[0-9.]+$/ {print $1; exit}'
+  omarchy_solicit_arp "$vmid"
+  ip -4 neigh show nud all | awk -v mac="$mac" 'BEGIN {IGNORECASE=1} $5 == mac && $1 ~ /^[0-9.]+$/ {print $1; exit}'
 }
 
 omarchy_ensure_sshpass() {
@@ -1180,7 +1203,7 @@ provision_omarchy_guest_agent() {
 
   log "Waiting for guest DHCP/ARP on VM ${vmid}..."
   ip=""
-  for i in $(seq 1 24); do
+  for i in $(seq 1 36); do
     ip=$(omarchy_guest_ipv4 "$vmid" || true)
     if [[ -n "$ip" ]]; then
       break
